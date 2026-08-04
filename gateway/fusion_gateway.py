@@ -49,12 +49,12 @@ import agents_core
 ROOT = Path(__file__).resolve().parent
 
 DEFAULT_CONFIG = {
-    "ota_url": "https://YOUR_TAILSCALE_FUNNEL.ts.net/xiaozhi/ota/",
-    "robot_mac": "YOUR_ROBOT_MAC",
-    "endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=YOUR_MCP_ENDPOINT_HEALTH_KEY",
+    "ota_url": "https://dahuilucaaaaa.tail61f3fa.ts.net/xiaozhi/ota/",
+    "robot_mac": "68:ee:8f:d7:3f:14",
+    "endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=9b55e82e498c4710b94a73d88ad1be3e",
     "docker_container": "xiaozhi-esp32-server",
     "docker_log_lookback_minutes": 120,
-    "auth_token": "CHANGE_ME_SECRET",
+    "auth_token": "f5c9a1e0-2b7d-4f3e-9a8b-6c4d2e1f0a3b",
     "allow_codex": True,
     "allow_claude": True,
     "codex_cli": "codex",
@@ -65,7 +65,7 @@ DEFAULT_CONFIG = {
     "http_host": "0.0.0.0",
     "http_port": 8010,
     "push_api_url": "http://127.0.0.1:8003/api/push",
-    "push_secret": "CHANGE_ME_SECRET",
+    "push_secret": "f5c9a1e0-2b7d-4f3e-9a8b-6c4d2e1f0a3b",
     "push_interval_s": 5,
 }
 
@@ -211,8 +211,6 @@ def push_send(text: str) -> tuple[bool, str]:
 def _drain_pending() -> tuple[int, int]:
     """把待播报消息逐条推给机器人; 返回 (成功数, 失败数)。"""
     items = pending_items()
-    if not items:
-        return 0, 0
     pushed_ids: set[str] = set()
     fail = 0
     for o in items:
@@ -228,7 +226,25 @@ def _drain_pending() -> tuple[int, int]:
             fail += 1
             log(f"push fail: {err} :: {text[:80]}")
     removed = pending_remove_ids(pushed_ids) if pushed_ids else 0
-    return len(pushed_ids), fail
+    # agent 事件(done/error)也主动推送: 成功即从 agent_events 移除,
+    # 失败保留(机器人唤醒时由 agent_pending 朗读兜底), 避免双队列重复播报。
+    ev_pushed: set[str] = set()
+    for ev in agents_core.events_read(clear=False):
+        etype = ev.get("type", "")
+        if etype not in ("done", "error"):
+            continue
+        label = "任务完成" if etype == "done" else "出错"
+        text = _tts_text(f"{ev.get('agent', 'agent')} {label}: {ev.get('summary', '')}")
+        ok, err = push_send(text)
+        if ok:
+            log(f"push ok: {text[:80]}")
+            ev_pushed.add(ev.get("id", ""))
+        else:
+            fail += 1
+            log(f"push fail: {err} :: {text[:80]}")
+    if ev_pushed:
+        agents_core.events_remove_ids(ev_pushed)
+    return len(pushed_ids) + len(ev_pushed), fail
 
 
 def _push_loop() -> None:
@@ -538,8 +554,6 @@ def build_http_app():
         if etype not in ("done", "progress", "error"):
             return JSONResponse({"error": f"unknown event: {etype}"}, status_code=400)
         agents_core.events_append(agent, etype, summary, session_id)
-        if etype == "done":
-            pending_append(f"{agent} 任务完成: {summary[:300]}", "agent")
         return JSONResponse({"ok": True, "pending": pending_count()})
 
     async def confirm_status(request):
@@ -617,7 +631,7 @@ def main() -> None:
         from mcp.server.transport_security import TransportSecuritySettings
         mcp.settings.transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-    allowed_hosts=[f"{host}:{port}", "127.0.0.1:*", "localhost:*", "YOUR_TAILSCALE_IP:*"],
+            allowed_hosts=[f"{host}:{port}", "127.0.0.1:*", "localhost:*", "100.69.221.25:*"],
         )
     except Exception as e:
         log(f"transport security config error: {e}")
