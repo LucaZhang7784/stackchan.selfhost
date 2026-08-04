@@ -15,7 +15,7 @@ try {
     $cfg = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
     $authToken = $cfg.auth_token
 } catch { }
-if (-not $authToken) { $authToken = 'CHANGE_ME_SECRET' }
+if (-not $authToken) { $authToken = 'f5c9a1e0-2b7d-4f3e-9a8b-6c4d2e1f0a3b' }
 
 $bridgeErr = 'D:\ProcessCenter\StackChan\fusion.firmware.0731\xiaozhi-mcp\bridge.err'
 $eventsFile = Join-Path $root 'data\agent_events.jsonl'
@@ -103,7 +103,7 @@ function Get-BridgeInfo {
 function Get-SelfhostRobot {
     # 自建链路机器人在线状态: 读 xiaozhi-esp32-server /api/status 的设备连接表
     # 返回 (是否在线, 连接数, 错误信息)
-    $mac = 'YOUR_ROBOT_MAC'
+    $mac = '68:ee:8f:d7:3f:14'
     try {
         $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8003/api/status' -TimeoutSec 5
         $conns = @($r.connections)
@@ -166,12 +166,40 @@ function Get-QueueItems {
 }
 
 function Show-QueueMessages {
-    $evs, $pus = Get-QueueItems
     $lines = @()
-    if ($evs.Count) { $lines += '===== 待播报事件 (agent_events) ====='; $lines += $evs }
+    $evs = @()
+    if (Test-Path -LiteralPath $eventsFile) {
+        $evs = @(Get-Content -LiteralPath $eventsFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+    }
+    if ($evs.Count) {
+        $lines += '===== 待播报事件 (agent_events) ====='
+        foreach ($e in $evs) {
+            try {
+                $o = $e | ConvertFrom-Json
+                $s = [string]$o.summary
+                $s = $s -replace '\s+', ' '
+                if ($s.Length -gt 180) { $s = $s.Substring(0, 180) + '...' }
+                $lines += "[$($o.ts)] $($o.agent) $($o.type): $s"
+            } catch { $lines += $e }
+        }
+    }
+    $pendingFile = Join-Path $root 'state\pending.jsonl'
+    $pus = @()
+    if (Test-Path -LiteralPath $pendingFile) {
+        $pus = @(Get-Content -LiteralPath $pendingFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() })
+    }
     if ($pus.Count) {
         if ($lines.Count) { $lines += '' }
-        $lines += '===== 推送队列 (pending, 自建链路用) ====='; $lines += $pus
+        $lines += '===== 推送队列 (pending, 自建链路用) ====='
+        foreach ($p in $pus) {
+            try {
+                $o = $p | ConvertFrom-Json
+                $t = [string]$o.text
+                $t = $t -replace '\s+', ' '
+                if ($t.Length -gt 180) { $t = $t.Substring(0, 180) + '...' }
+                $lines += "[$($o.created_at)] $t"
+            } catch { $lines += $p }
+        }
     }
     if (-not $lines.Count) { $lines = '(队列为空)' }
     $form = New-Object System.Windows.Forms.Form
