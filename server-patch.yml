@@ -9,3 +9,4 @@ services:
       - ./server-patch/core/connection.py:/opt/xiaozhi-esp32-server/core/connection.py:ro
       - ./server-patch/core/http_server.py:/opt/xiaozhi-esp32-server/core/http_server.py:ro
       - ./server-patch/core/providers/llm/openai/openai.py:/opt/xiaozhi-esp32-server/core/providers/llm/openai/openai.py:ro
+      - ./server-patch/core/providers/asr/aliyunbl_stream.py:/opt/xiaozhi-esp32-server/core/providers/asr/aliyunbl_stream.py:ro

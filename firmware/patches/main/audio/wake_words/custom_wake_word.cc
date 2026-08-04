@@ -134,7 +134,8 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
 
     multinet_ = esp_mn_handle_from_name(mn_name_);
     multinet_model_data_ = multinet_->create(mn_name_, duration_);
-    // 唤醒灵敏度: 阈值下限 0.30 (0.20 过低易误触发; 0.35 偏保守导致唤醒慢)
+    // 唤醒灵敏度: 阈值下限 0.30 (实测「阿松」置信度 ~0.44, 0.40 会漏唤醒;
+    // 垃圾唤醒词由下方 command_id 越界保护拦截, 不需要靠提高阈值)
     threshold_ = std::max(threshold_, 0.30f);
     multinet_->set_det_threshold(multinet_model_data_, threshold_);
     ESP_LOGI(TAG, "multinet detect threshold set to %.2f", threshold_);
@@ -195,7 +196,15 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
             for (int i = 0; i < mn_result->num && running_; i++) {
                 ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f",
                         mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
-                auto& command = commands_[mn_result->command_id[i] - 1];
+                int cid = mn_result->command_id[i];
+                // 越界保护: 模型偶发返回命令表外的 command_id(误触发), 直接跳过,
+                // 绝不能越界访问 commands_ 把垃圾内存当唤醒词
+                if (cid < 1 || cid > static_cast<int>(commands_.size())) {
+                    ESP_LOGW(TAG, "Ignoring out-of-range command_id=%d (commands=%d), prob=%f",
+                             cid, static_cast<int>(commands_.size()), mn_result->prob[i]);
+                    continue;
+                }
+                auto& command = commands_[cid - 1];
                 if (command.action == "wake") {
                     last_detected_wake_word_ = command.text;
                     running_ = false;
