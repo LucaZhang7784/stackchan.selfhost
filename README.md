@@ -90,8 +90,8 @@ powershell -ExecutionPolicy Bypass -File run_gateway.ps1
   (曾把「偷偷吓我」当唤醒词) → 越界保护, 只认命令表内「阿松/你好小智」。
 - **修复 LED 状态灯锁死**: `led_manual_` 一旦置位, 聆听蓝/播报绿永久失效 →
   活跃状态强制状态色, 手动色仅待机保持。
-- **队列污染**: codex hook 不再把每次直接对话回复推成「任务完成」进播报队列
-  (`gateway/config.json` 的 `push_direct_done` 可重新开启)。
+- **主动播报**: codex 完成任务后默认主动推送给机器人播报
+  (`gateway/config.json` 的 `push_direct_done`; 做唤醒测试时可临时关闭, 避免队列干扰)。
 - **可观测性**: 服务器 ASR 增加耗时日志 (`ASR 会话开始` → `ASR 识别耗时 X.XXs`)。
 
 ### v1.0.7 (2026-08-03) — 四 agent 接入 + 主动播报
