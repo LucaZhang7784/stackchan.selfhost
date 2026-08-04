@@ -169,6 +169,16 @@ def events_read(clear: bool = False) -> list[dict]:
     return items[-20:]
 
 
+def events_remove_ids(ids: set[str]) -> int:
+    """推送成功的事件按 id 移除, 避免队列残留导致托盘计数虚高/重复播报。"""
+    if not EVENTS_FILE.exists() or not ids:
+        return 0
+    lines = [l for l in EVENTS_FILE.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()]
+    kept = [l for l in lines if json.loads(l).get("id") not in ids]
+    EVENTS_FILE.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    return len(lines) - len(kept)
+
+
 def _confirmations() -> list[dict]:
     if not CONFIRM_FILE.exists():
         return []
