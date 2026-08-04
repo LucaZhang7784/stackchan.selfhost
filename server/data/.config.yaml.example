@@ -1,0 +1,89 @@
+# xiaozhi-esp32-server 配置覆盖文件 (自建链路)
+# 复制为 data/.config.yaml 并替换所有 YOUR_* 占位符后重启容器
+
+server:
+  fusion_secret: CHANGE_ME_SECRET        # 与 gateway/config.json 的 push_secret 一致
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  # OTA 下发给设备的 websocket 地址 (Tailscale Funnel 443, funnel_proxy 按路径分发)
+  websocket: wss://YOUR_TAILSCALE_FUNNEL.ts.net/xiaozhi/v1/
+  vision_explain: https://YOUR_TAILSCALE_FUNNEL.ts.net/mcp/vision/explain
+  timezone_offset: +8
+  auth:
+    enabled: false
+    allowed_devices:
+      - "YOUR_ROBOT_MAC"   # 机器人 MAC (esptool chip-id 获取)
+
+# MCP 接入点 (mcp-endpoint-server 容器, 从容器启动日志获取当前 token)
+mcp_endpoint: ws://YOUR_TAILSCALE_IP:8004/mcp_endpoint/mcp/?token=YOUR_MCP_ENDPOINT_TOKEN
+
+selected_module:
+  VAD: SileroVAD
+  ASR: AliyunBLStreamASR   # 阿里百炼 Paraformer-realtime-v2 流式
+  LLM: DeepSeekLLM
+  VLLM: MiMoVLLM
+  TTS: EdgeTTS
+  Memory: nomem
+  Intent: function_call
+
+LLM:
+  MiMoLLM:
+    type: openai
+    model_name: mimo-v2.5-pro
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: ${MIMO_API_KEY}
+  DeepSeekLLM:
+    type: openai
+    model_name: deepseek-v4-flash
+    url: https://api.deepseek.com/v1
+    api_key: YOUR_DEEPSEEK_API_KEY
+
+VLLM:
+  MiMoVLLM:
+    type: openai
+    model_name: mimo-v2.5
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: ${MIMO_API_KEY}
+
+ASR:
+  Qwen3ASRFlash:
+    type: qwen3_asr_flash
+    api_key: YOUR_DASHSCOPE_API_KEY
+    model_name: qwen3-asr-flash
+    output_dir: tmp/
+    enable_lid: true
+    enable_itn: true
+    context: "StackChan 桌面机器人，常用指令：查询任务、执行 Codex 任务、播报通知"
+  AliyunBLStreamASR:
+    type: aliyunbl_stream
+    api_key: YOUR_DASHSCOPE_API_KEY
+    model: paraformer-realtime-v2
+    format: pcm
+    sample_rate: 16000
+    max_sentence_silence: 200
+    semantic_punctuation_enabled: false
+    disfluency_removal_enabled: false
+    punctuation_prediction_enabled: true
+    inverse_text_normalization_enabled: true
+    output_dir: tmp/
+
+TTS:
+  EdgeTTS:
+    type: edge
+    voice: zh-HK-HiuGaaiNeural
+    rate: 20
+    output_dir: tmp/
+
+# 关闭会话结束语
+end_prompt:
+  enable: false
+
+# 服务器空闲连接超时调大(秒): 避免静默会话被频繁回收
+close_connection_no_voice_time: 3600
+
+# 阿松 角色提示词 (与 prompt-阿松-v3.md 对齐)
+prompt: |
+  你是阿松，桌面陪伴 AI，活泼可爱、口语自然。
+  【语言】回复语言跟随机器人的音色/语音预设。
+  (完整内容见 prompt-阿松-v3.md)
