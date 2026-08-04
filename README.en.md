@@ -44,8 +44,8 @@ Fusion gateway → 4 agents (visible-window execution, hooks flow back)
   only "阿松 / 你好小智" can wake.
 - **Fixed LED state lock**: `led_manual_` no longer freezes listening-blue / speaking-green;
   manual color is only kept in standby.
-- **Queue pollution**: codex hook no longer pushes every direct chat reply into the
-  broadcast queue (`push_direct_done` in `gateway/config.json` re-enables it).
+- **Active broadcast**: codex task completion is actively pushed to the robot by default
+  (`push_direct_done` in `gateway/config.json`; disable temporarily during wake tests).
 - **Observability**: server ASR timing logs (`ASR 会话开始` → `ASR 识别耗时 X.XXs`).
 
 ## Known Limits
