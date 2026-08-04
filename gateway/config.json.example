@@ -16,5 +16,6 @@
   "http_port": 8010,
   "push_api_url": "http://127.0.0.1:8003/api/push",
   "push_secret": "CHANGE_ME_SECRET",
-  "push_interval_s": 5
+  "push_interval_s": 5,
+  "push_direct_done": false
 }

@@ -857,7 +857,10 @@ void Application::HandleWakeWordDetectedEvent() {
             });
             return;
         }
-        // Channel already opened, continue directly
+        // Channel already opened, continue directly:
+        // 直连时状态仍是 idle, 而 ContinueWakeWordInvoke 要求 connecting,
+        // 不先置位会直接 return, 导致「唤醒无反应」
+        SetDeviceState(kDeviceStateConnecting);
         ContinueWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);

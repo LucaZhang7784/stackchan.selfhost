@@ -9,7 +9,7 @@
 ## 架构
 
 ```
-机器人 (CoreS3, 固件 v1.0.7g-selfhost)
+机器人 (CoreS3, 固件 v1.0.8-selfhost)
   │ 语音走 Tailscale Funnel 443 (局域网 AP 隔离, 不能直连)
   ▼
 Tailscale Funnel → funnel_proxy.py (8090) → xiaozhi-esp32-server (docker 8000/8003)
@@ -29,7 +29,7 @@ Tailscale Funnel → funnel_proxy.py (8090) → xiaozhi-esp32-server (docker 800
 | `server-patch/` | 容器补丁 (fusion_push 主动播报 / connection / http_server / LLM 禁思考) |
 | `gateway/` | 融合网关 (MCP 工具) + 系统托盘 + 自启脚本 |
 | `agents/` | 四 agent 的 hooks / 可见窗口执行脚本 |
-| `firmware/` | v1.0.7g 固件 (bin) + 构建脚本 + 源码补丁 |
+| `firmware/` | v1.0.8 固件 (bin) + 构建脚本 + 源码补丁 |
 | `scripts/` | 连通性验证 |
 | `prompt-阿松-v3.md` | 机器人系统提示词 |
 
@@ -62,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File run_gateway.ps1
 
 ### 4. 固件
 
-刷入 `firmware/post-fw-v1.0.7g-selfhost/xiaozhi.bin` (app-only @ 0x410000),
+刷入 `firmware/post-fw-v1.0.8-selfhost/xiaozhi.bin` (app-only @ 0x410000),
 或按 `firmware/patches/PATCHES.md` 用你自己的 OTA 地址重编译。
 
 ### 5. Prompt
@@ -75,10 +75,29 @@ powershell -ExecutionPolicy Bypass -File run_gateway.ps1
 
 | 目标 | 刷入固件 |
 |---|---|
-| 自建链路 | `firmware/post-fw-v1.0.7g-selfhost/xiaozhi.bin` |
+| 自建链路 | `firmware/post-fw-v1.0.8-selfhost/xiaozhi.bin` |
 | 云链路 (xiaozhi.me) | 历史 `post-fw-v1.0.6-ttsbuf/xiaozhi.bin` (OTA 默认 api.tenclass.net) |
 
 > 注意: 云固件无 OTA 地址守卫, 若 NVS 里残留过自建 wss 地址, 需先重新配网/清 NVS 的 wifi.ota_url。
+
+## 更新日志
+
+### v1.0.8 (2026-08-04) — 唤醒可靠性
+
+- **修复「唤醒无反应」**: 预热通道已打开时, 唤醒直连路径因 `ContinueWakeWordInvoke` 要求
+  `connecting` 状态而直接返回 → 先置状态再直连, 唤醒必进聆听。
+- **修复垃圾唤醒词**: 唤醒模型误触发返回命令表外的 `command_id` 时会越界读内存
+  (曾把「偷偷吓我」当唤醒词) → 越界保护, 只认命令表内「阿松/你好小智」。
+- **修复 LED 状态灯锁死**: `led_manual_` 一旦置位, 聆听蓝/播报绿永久失效 →
+  活跃状态强制状态色, 手动色仅待机保持。
+- **队列污染**: codex hook 不再把每次直接对话回复推成「任务完成」进播报队列
+  (`gateway/config.json` 的 `push_direct_done` 可重新开启)。
+- **可观测性**: 服务器 ASR 增加耗时日志 (`ASR 会话开始` → `ASR 识别耗时 X.XXs`)。
+
+### v1.0.7 (2026-08-03) — 四 agent 接入 + 主动播报
+
+- 4 个 agent (codex/claude/agy/pi) hooks 回流, 唤醒优先播报队列。
+- 预热 WS 常驻 + 300s 自愈; 播报关麦克风防自触发; 双击/摸头打断与唤醒。
 
 ## 已知限制
 

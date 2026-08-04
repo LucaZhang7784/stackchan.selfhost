@@ -1364,6 +1364,7 @@ private:
     // ---- PY32 持久 I2C 设备句柄（控 LED + 其他扩展）----
     i2c_master_dev_handle_t py32_dev_ = nullptr;
     bool led_manual_ = false;
+    uint16_t manual_color_ = 0;   // 手动色(待机时恢复用), set_color/turn_off 写入
     const char* last_state_eff_ = nullptr;   // 上次状态色(变化才写/才打日志)
     StateLed state_led_{this};
     // ---- BMI270 (IMU) ----
@@ -1594,9 +1595,13 @@ private:
 
     void UpdateLedsFromEmotion(const char* emotion) {
         if (!py32_dev_) return;
-        if (led_manual_) return;
-        // 状态优先: 聆听/播报/连接时强制状态色, 防止服务器 emotion 字段把反馈色覆盖回 neutral
         auto st = Application::GetInstance().GetDeviceState();
+        // 手动色只在待机时保持; 聆听/播报/连接强制状态反馈色
+        if (led_manual_ && st != kDeviceStateConnecting &&
+            st != kDeviceStateListening && st != kDeviceStateSpeaking) {
+            return;
+        }
+        // 状态优先: 聆听/播报/连接时强制状态色, 防止服务器 emotion 字段把反馈色覆盖回 neutral
         const char* eff = emotion;
         if (st == kDeviceStateConnecting) eff = "connecting";
         else if (st == kDeviceStateListening) eff = "listening";
@@ -1765,6 +1770,7 @@ private:
                 for (int i = 0; i < 12; i++) colors[i] = color;
                 Py32SetLedFrame(colors, 12);
                 led_manual_ = true;
+                manual_color_ = color;
                 ESP_LOGI(TAG, "MCP set LED color: r=%d g=%d b=%d", r, g, b);
                 return true;
             });
@@ -1775,6 +1781,7 @@ private:
                 uint16_t off[12] = {};
                 Py32SetLedFrame(off, 12);
                 led_manual_ = true;
+                manual_color_ = 0;
                 ESP_LOGI(TAG, "MCP LED off");
                 return true;
             });
@@ -2095,10 +2102,10 @@ private:
         static int64_t pending_single_release_time = 0;
 
         const int64_t SHORT_TOUCH_MS = 500;
-        const int64_t PET_TOUCH_MS = 1500;
+        const int64_t PET_TOUCH_MS = 500;
         const int64_t DOUBLE_CLICK_MS = 500;       // 双击窗口放宽
         const int SWIPE_THRESHOLD_PX = 20;         // 滑动门槛降低
-        const int PET_MOVE_THRESHOLD_PX = 8;   // 防抖: 微位移不再算摸头
+        const int PET_MOVE_THRESHOLD_PX = 3;   // 防抖: 轻拍/轻抚即可触发(拍头唤醒)
         const int CLICK_MAX_MOVE_PX = 5;           // 短按/双击允许的最大位移：超过就不算短按了
 
         ft6336_->UpdateTouchPoint();
@@ -2455,8 +2462,21 @@ void StateLed::OnStateChanged() {
 }
 
 void M5StackCoreS3Board::UpdateLedFromDeviceState() {
-    if (!py32_dev_ || led_manual_) return;
+    if (!py32_dev_) return;
     auto st = Application::GetInstance().GetDeviceState();
+    bool active = st == kDeviceStateConnecting ||
+                  st == kDeviceStateListening ||
+                  st == kDeviceStateSpeaking;
+    if (led_manual_ && !active) {
+        // 手动色模式回到待机: 若刚离开活跃状态, 恢复手动色(避免残留状态色)
+        if (manual_color_ != 0 && last_state_eff_ && strcmp(last_state_eff_, "neutral") != 0) {
+            uint16_t colors[12];
+            for (int i = 0; i < 12; i++) colors[i] = manual_color_;
+            Py32SetLedFrame(colors, 12);
+        }
+        last_state_eff_ = "neutral";
+        return;
+    }
     const char* eff = "neutral";
     switch (st) {
         case kDeviceStateConnecting: eff = "connecting"; break;

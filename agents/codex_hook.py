@@ -151,6 +151,17 @@ def _is_gateway_spawn(cwd: str) -> bool:
         return False
 
 
+def _direct_done_enabled() -> bool:
+    """是否播报「直接 codex 桌面/CLI 任务」的完成。
+    默认关闭: 聊天/调试回复也会被当成任务完成推给机器人, 污染唤醒队列。
+    机器人发起的 agent_query 任务由 agents_core 自行上报, 不受此开关影响。"""
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        return bool(cfg.get("push_direct_done", False))
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     try:
         raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else b""
@@ -173,6 +184,9 @@ if __name__ == "__main__":
         if _is_gateway_spawn(str(data.get("cwd", ""))):
             _log(f"skip done: gateway-spawned {session_id}")
         elif not _recently_done(session_id):
-            summary = _transcript_summary(data) or "任务已结束"
-            _post("done", summary, session_id)
+            if not _direct_done_enabled():
+                _log(f"skip done: direct-turn broadcast disabled (push_direct_done=false) {session_id}")
+            else:
+                summary = _transcript_summary(data) or "任务已结束"
+                _post("done", summary, session_id)
     sys.exit(0)
