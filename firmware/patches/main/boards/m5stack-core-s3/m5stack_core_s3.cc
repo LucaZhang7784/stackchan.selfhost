@@ -1572,7 +1572,11 @@ private:
         if (len + 1 > sizeof(buf)) return false;
         buf[0] = reg;
         memcpy(buf + 1, data, len);
-        return i2c_master_transmit(py32_dev_, buf, len + 1, 200) == ESP_OK;
+        auto err = i2c_master_transmit(py32_dev_, buf, len + 1, 200);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "PY32 I2C write reg 0x%02X failed: %s", reg, esp_err_to_name(err));
+        }
+        return err == ESP_OK;
     }
 
     bool Py32SetLedFrame(const uint16_t* rgb565_colors, size_t count) {
@@ -2190,9 +2194,17 @@ private:
                     pending_single_release = false;
                     auto& app = Application::GetInstance();
                     auto st = app.GetDeviceState();
-                    if (st == kDeviceStateSpeaking || st == kDeviceStateListening) {
-                        // 播报/聆听中双击 → 打断播报/停止聆听(与单击一致), 随后可继续说话
+                    if (st == kDeviceStateSpeaking) {
+                        // 播报中双击 → 打断播报并直接进入聆听
+                        // (StartListening 内部处理 AbortSpeaking + SetListeningMode)
+                        app.StartListening();
+                    } else if (st == kDeviceStateListening) {
+                        // 聆听中双击 → 停止聆听
                         app.ToggleChatState();
+                    } else if (st == kDeviceStateIdle) {
+                        // 首要唤醒方式: 双击 → 直接聆听(ManualStop, 不自动停止),
+                        // 与 阿松/摸头(同级, auto) 解耦, 不依赖随机互动文本
+                        app.StartListening();
                     } else {
                         SendUserMessage(PickRandom(DoubleClickPool()));
                     }

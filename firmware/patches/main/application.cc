@@ -805,18 +805,19 @@ void Application::HandleStartListeningEvent() {
     }
 
     if (state == kDeviceStateIdle) {
+        ListeningMode mode = GetDefaultListeningMode();  // auto: 回复完自动回待机
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() {
-                ContinueOpenAudioChannel(kListeningModeManualStop);
+            Schedule([this, mode]() {
+                ContinueOpenAudioChannel(mode);
             });
             return;
         }
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(mode);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(GetDefaultListeningMode());
     }
 }
 
@@ -1098,8 +1099,12 @@ void Application::SendUserText(const std::string& text) {
     }
     auto state = GetDeviceState();
     if (state == kDeviceStateIdle) {
-        // 待机时走标准唤醒路径建立 channel
-        WakeWordInvoke(text);
+        // 待机时走标准唤醒路径建立 channel; 必须在主任务执行
+        // (触摸定时器任务直接调用 WakeWordInvoke 会卡死协议/状态机,
+        //  表现为: 手势文本显示了但既不聆听也不待命)
+        Schedule([this, text]() {
+            WakeWordInvoke(text);
+        });
     } else if (state == kDeviceStateSpeaking) {
         // 打断当前说话，等 channel 关闭后重新唤醒
         Schedule([this, text]() {
