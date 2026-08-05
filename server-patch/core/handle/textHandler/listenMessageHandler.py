@@ -36,6 +36,19 @@ class ListenTextMessageHandler(TextMessageHandler):
         if msg_json["state"] == "start":
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
+            # Phase 7.1: ASR 预连接 - 在用户说话前建立 NLS 握手, 消除 ~2s 连接窗口丢字;
+            # 5s 空转自动销毁 + 防重入锁 在 aliyunbl_stream.prewarm 内部处理
+            if conn.asr is not None and hasattr(conn.asr, "prewarm"):
+                try:
+                    asyncio.create_task(conn.asr.prewarm(conn))
+                except Exception as e:
+                    conn.logger.bind(tag=TAG).warning(f"ASR 预连接调度失败: {e}")
+            # Phase 7.1: EdgeTTS 预热 - 把微软云握手移出"说完话→出声"关键路径
+            if conn.tts is not None and hasattr(conn.tts, "warmup"):
+                try:
+                    conn.tts.warmup()
+                except Exception as e:
+                    conn.logger.bind(tag=TAG).debug(f"EdgeTTS 预热调度失败: {e}")
             # GLM-Realtime: 新一轮聆听前清空实时输入缓冲
             if getattr(conn.llm, "is_realtime", False) and hasattr(conn.llm, "clear_buffer"):
                 await conn.llm.clear_buffer()

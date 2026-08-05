@@ -59,24 +59,21 @@ class ASRProviderBase(ABC):
 
     # 接收音频
     async def receive_audio(self, conn: "ConnectionHandler", pcm_frame, audio_have_voice):
-        if conn.client_listen_mode == "manual":
-            # 手动模式：缓存音频用于ASR识别
-            conn.asr_audio.append(pcm_frame)
-        else:
-            # 自动/实时模式：使用VAD检测
-            conn.asr_audio.append(pcm_frame)
+        # Phase 7.1: ASR 缓存仅保留最近 800ms(60ms/帧 → 13帧), 防手动模式/网络波动积压过长缓存
+        conn.asr_audio.append(pcm_frame)
+        if len(conn.asr_audio) > 13:
+            conn.asr_audio = conn.asr_audio[-13:]
 
-            # 如果没有语音，且之前也没有声音，缓存部分音频
+        if conn.client_listen_mode != "manual":
+            # 自动/实时模式：使用VAD检测
             if not audio_have_voice and not conn.client_have_voice:
-                conn.asr_audio = conn.asr_audio[-10:]
                 return
 
-            # 自动模式下通过VAD检测到语音停止时触发识别
+            # 自动模式下通过VAD检测到语音停止时触发识别(非流式 ASR 走本地 PCM 缓存)
             if conn.asr.interface_type != InterfaceType.STREAM and conn.client_voice_stop:
-                # 直接使用asr_audio中的PCM数据
                 pcm_bytes = b"".join(conn.asr_audio)
-                # 检查是否有足够的音频数据（每帧1920字节，15帧约28800字节）
-                if len(pcm_bytes) > 1920 * 15:
+                # 检查是否有足够的音频数据(每帧1920字节, 12帧≈720ms)
+                if len(pcm_bytes) > 1920 * 12:
                     await self.handle_voice_stop(conn, [pcm_bytes])
                 conn.reset_audio_states()
 

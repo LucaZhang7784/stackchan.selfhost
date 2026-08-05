@@ -15,7 +15,7 @@ try {
     $cfg = Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json
     $authToken = $cfg.auth_token
 } catch { }
-if (-not $authToken) { $authToken = 'change-me-local-auth-token' }
+if (-not $authToken) { $authToken = 'CHANGE_ME_TOKEN' }
 
 $bridgeErr = 'D:\ProcessCenter\StackChan\fusion.firmware.0731\xiaozhi-mcp\bridge.err'
 $eventsFile = Join-Path $root 'data\agent_events.jsonl'
@@ -103,7 +103,7 @@ function Get-BridgeInfo {
 function Get-SelfhostRobot {
     # 自建链路机器人在线状态: 读 xiaozhi-esp32-server /api/status 的设备连接表
     # 返回 (是否在线, 连接数, 错误信息)
-    $mac = 'AA:BB:CC:DD:EE:FF'
+    $mac = 'YOUR_ROBOT_MAC'
     try {
         $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8003/api/status' -TimeoutSec 5
         $conns = @($r.connections)

@@ -27,6 +27,11 @@ class ASRProvider(ASRProviderBase):
         self.is_processing = False
         self.server_ready = False  # 服务器准备状态
         self.task_id = None  # 当前任务ID
+        # Phase 7.1: ASR 预连接(防重入锁 / 5s 空转看门狗 / 语音标记)
+        self._prewarm_lock = None
+        self._watchdog_task = None
+        self._voice_seen = False
+        self._cleanup_lock = None  # Phase 7.1: 幂等清理锁, 防 watchdog 与 forward loop 双清理竞态
 
         # 阿里百炼配置
         self.api_key = config.get("api_key")
@@ -39,6 +44,15 @@ class ASRProvider(ASRProviderBase):
         self.disfluency_removal_enabled = config.get("disfluency_removal_enabled", False)
         self.language_hints = config.get("language_hints")
         self.semantic_punctuation_enabled = config.get("semantic_punctuation_enabled", False)
+        # Phase 7.1 终极修补: 同音词纠错映射(wrong|right), 在 ASR 返回前替换,
+        # 解决「可头大/扣代码/扣德斯」等被识别成非目标词导致不触发 agent_query 的问题
+        self.correct_words = {}
+        for item in config.get("correct_words", []) or []:
+            if isinstance(item, str) and "|" in item:
+                wrong, right = item.split("|", 1)
+                wrong, right = wrong.strip(), right.strip()
+                if wrong:
+                    self.correct_words[wrong] = right
         max_sentence_silence = config.get("max_sentence_silence")
         self.max_sentence_silence = int(max_sentence_silence) if max_sentence_silence else 200
         self.multi_threshold_mode_enabled = config.get("multi_threshold_mode_enabled", False)
@@ -57,6 +71,9 @@ class ASRProvider(ASRProviderBase):
     async def receive_audio(self, conn, pcm_frame, audio_have_voice):
         # 先调用父类方法处理基础逻辑
         await super().receive_audio(conn, pcm_frame, audio_have_voice)
+
+        if audio_have_voice:
+            self._voice_seen = True
 
         # 只在有声音且没有连接时建立连接
         if audio_have_voice and not self.is_processing and not self.asr_ws:
@@ -77,15 +94,54 @@ class ASRProvider(ASRProviderBase):
                 logger.bind(tag=TAG).warning(f"发送音频失败: {str(e)}")
                 await self._cleanup()
 
+    async def prewarm(self, conn: "ConnectionHandler"):
+        """listen:start 时预连接 NLS ASR, 在用户说话前完成握手(消除连接窗口丢字)"""
+        if self._prewarm_lock is None:
+            self._prewarm_lock = asyncio.Lock()
+        async with self._prewarm_lock:
+            # 防重入: 连续唤醒/双击时严禁重复拉起多个预连线程
+            if self.is_processing or self.asr_ws is not None:
+                return
+            try:
+                await self._start_recognition(conn)
+            except Exception as e:
+                logger.bind(tag=TAG).error(f"ASR 预连接失败: {str(e)}")
+                return
+            # 5s 空转自动销毁: 预连后用户 5s 内未说话 → 关闭 WebSocket, 防空挂/扣费
+            if self._watchdog_task and not self._watchdog_task.done():
+                self._watchdog_task.cancel()
+            self._watchdog_task = asyncio.create_task(self._prewarm_watchdog(conn))
+
+    async def _prewarm_watchdog(self, conn: "ConnectionHandler"):
+        try:
+            await asyncio.sleep(5)
+            if not self._voice_seen:
+                logger.bind(tag=TAG).info(
+                    f"ASR 预连 5s 空转(用户未说话), 自动关闭 (task_id: {self.task_id})"
+                )
+                await self._cleanup()
+                try:
+                    # Phase 7.1: 通知设备终止聆听, 否则机器人卡在聆听态(LED 蓝灯不恢复)
+                    await conn.websocket.send(
+                        json.dumps({"type": "listen", "state": "stop"}, ensure_ascii=False)
+                    )
+                    logger.bind(tag=TAG).info("已下发 listen: stop 驱动设备回复待机状态(暖橙色灯)")
+                except Exception as e:
+                    logger.bind(tag=TAG).warning(f"下发 listen: stop 失败: {e}")
+        except asyncio.CancelledError:
+            pass
+
     async def _start_recognition(self, conn: "ConnectionHandler"):
         """开始识别会话"""
         try:
             # 如果为手动模式,设置超时时长为最大值
             if conn.client_listen_mode == "manual":
-                self.max_sentence_silence = 6000
+                # Phase 7.1: 手动(双击)模式句末静默 6000ms→800ms, 消除说完话干等 6 秒
+                self.max_sentence_silence = 800
 
             self.is_processing = True
             self.task_id = uuid.uuid4().hex
+            self._voice_seen = False
             self.asr_start_ts = time.monotonic()
             logger.bind(tag=TAG).info(f"ASR 会话开始 (task_id: {self.task_id})")
 
@@ -165,6 +221,9 @@ class ASRProvider(ASRProviderBase):
         if self.language_hints:
             message["payload"]["parameters"]["language_hints"] = self.language_hints
 
+        # Phase 7.1: 打印实际发往阿里云 NLS 的 run-task JSON, 供核对判停参数确实透传
+        # (streaming ASR 的句末静默参数为 payload.parameters.max_sentence_silence, 单位 ms)
+        logger.bind(tag=TAG).info(f"ASR run-task JSON: {json.dumps(message, ensure_ascii=False)}")
         return message
 
     async def _forward_results(self, conn: "ConnectionHandler"):
@@ -183,6 +242,20 @@ class ASRProvider(ASRProviderBase):
 
                     # 处理task-started事件
                     if event == "task-started":
+                        # Phase 7.1: 校验阿里云返回 status=20000000 Success。
+                        # 注意: task-started 事件头通常不带 status_code(实测为 None),
+                        # 只在"存在且非 20000000"时才判失败, 避免误杀正常会话。
+                        status_code = header.get("status_code")
+                        if status_code is not None and status_code != 20000000:
+                            logger.bind(tag=TAG).error(
+                                f"ASR task-started 非成功: status={status_code} "
+                                f"error_code={header.get('error_code')} msg={header.get('error_message')} "
+                                f"(task_id: {self.task_id})"
+                            )
+                            break
+                        logger.bind(tag=TAG).debug(
+                            f"task-started 事件头: {json.dumps(header, ensure_ascii=False)}"
+                        )
                         self.server_ready = True
                         logger.bind(tag=TAG).debug("服务器已准备，开始发送缓存音频...")
 
@@ -192,6 +265,8 @@ class ASRProvider(ASRProviderBase):
                             for cached_pcm in conn.asr_audio:
                                 try:
                                     await self.asr_ws.send(cached_pcm)
+                                    # Phase 7.1: 预卷回溯逐帧让出事件循环, 防止大包异步解压阻塞主循环
+                                    await asyncio.sleep(0)
                                 except Exception as e:
                                     logger.bind(tag=TAG).warning(f"发送缓存音频失败: {e}")
                                     break
@@ -295,11 +370,22 @@ class ASRProvider(ASRProviderBase):
 
     async def _cleanup(self):
         """清理资源"""
+        if self._cleanup_lock is None:
+            self._cleanup_lock = asyncio.Lock()
+        async with self._cleanup_lock:
+            await self._cleanup_locked()
+
+    async def _cleanup_locked(self):
+        """清理资源(调用方需持有 _cleanup_lock)"""
+        if not self.is_processing and self.asr_ws is None and self.task_id is None:
+            return  # 已清理过, 幂等返回
+
         logger.bind(tag=TAG).debug(f"开始ASR会话清理 | 当前状态: processing={self.is_processing}, server_ready={self.server_ready}")
 
         # 状态重置
         self.is_processing = False
         self.server_ready = False
+        self._voice_seen = False
         logger.bind(tag=TAG).debug("ASR状态已重置")
 
         # 关闭连接
@@ -310,9 +396,12 @@ class ASRProvider(ASRProviderBase):
                 # 等待一小段时间让服务器处理
                 await asyncio.sleep(0.1)
 
-                logger.bind(tag=TAG).debug("正在关闭WebSocket连接")
-                await asyncio.wait_for(self.asr_ws.close(), timeout=2.0)
-                logger.bind(tag=TAG).debug("WebSocket连接已关闭")
+                if not getattr(self.asr_ws, "closed", False):
+                    logger.bind(tag=TAG).debug("正在关闭WebSocket连接")
+                    await asyncio.wait_for(self.asr_ws.close(), timeout=2.0)
+                    logger.bind(tag=TAG).debug("WebSocket连接已关闭")
+            except websockets.ConnectionClosed:
+                logger.bind(tag=TAG).debug("WebSocket连接在清理前已由服务端正常关闭")
             except Exception as e:
                 logger.bind(tag=TAG).error(f"关闭WebSocket连接失败: {e}")
             finally:
@@ -328,6 +417,11 @@ class ASRProvider(ASRProviderBase):
         """获取识别结果"""
         result = self.text
         self.text = ""
+        if result and self.correct_words:
+            for wrong, right in self.correct_words.items():
+                if wrong in result:
+                    result = result.replace(wrong, right)
+                    logger.bind(tag=TAG).info(f"ASR 纠错: '{wrong}' -> '{right}' | 原文: {result}")
         return result, None
 
     async def close(self):
