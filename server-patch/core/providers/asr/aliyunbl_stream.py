@@ -61,7 +61,9 @@ class ASRProvider(ASRProviderBase):
         # 只在有声音且没有连接时建立连接
         if audio_have_voice and not self.is_processing and not self.asr_ws:
             try:
-                await self._start_recognition(conn)
+                # 后台建立 DashScope 连接: 不能阻塞设备连接的消息处理循环,
+                # 否则 DashScope 握手慢/卡时会拖死设备连接(「聆听后 ~12s 断连」的根因)
+                asyncio.create_task(self._start_recognition(conn))
             except Exception as e:
                 logger.bind(tag=TAG).error(f"开始识别失败: {str(e)}")
                 await self._cleanup()
@@ -94,13 +96,17 @@ class ASRProvider(ASRProviderBase):
 
             logger.bind(tag=TAG).debug(f"正在连接阿里百炼ASR服务, task_id: {self.task_id}")
 
-            self.asr_ws = await websockets.connect(
-                self.ws_url,
-                additional_headers=headers,
-                max_size=1000000000,
-                ping_interval=None,
-                ping_timeout=None,
-                close_timeout=5,
+            # DashScope 握手加 5s 超时: 服务不可达时快速失败, 不拖死设备连接
+            self.asr_ws = await asyncio.wait_for(
+                websockets.connect(
+                    self.ws_url,
+                    additional_headers=headers,
+                    max_size=1000000000,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    close_timeout=5,
+                ),
+                timeout=5,
             )
 
             logger.bind(tag=TAG).debug("WebSocket连接建立成功")
@@ -116,10 +122,14 @@ class ASRProvider(ASRProviderBase):
         except Exception as e:
             logger.bind(tag=TAG).error(f"建立ASR连接失败: {str(e)}")
             if self.asr_ws:
-                await self.asr_ws.close()
+                try:
+                    await self.asr_ws.close()
+                except Exception:
+                    pass
                 self.asr_ws = None
             self.is_processing = False
-            raise
+            # 不 re-raise: 后台任务路径下未处理异常只会变成噪声日志,
+            # 且设备连接必须存活(失败后由下一次语音重新建立 ASR)
 
     def _build_run_task_message(self) -> dict:
         """构建run-task指令"""
@@ -176,14 +186,16 @@ class ASRProvider(ASRProviderBase):
                         self.server_ready = True
                         logger.bind(tag=TAG).debug("服务器已准备，开始发送缓存音频...")
 
-                        # 发送缓存音频
+                        # 发送全部缓存音频: 只发最后 10 帧(600ms)会丢掉用户
+                        # 开头 1~2 秒的语音(「前几个字不全」的根因)
                         if conn.asr_audio:
-                            for cached_pcm in conn.asr_audio[-10:]:
+                            for cached_pcm in conn.asr_audio:
                                 try:
                                     await self.asr_ws.send(cached_pcm)
                                 except Exception as e:
                                     logger.bind(tag=TAG).warning(f"发送缓存音频失败: {e}")
                                     break
+                            conn.asr_audio.clear()
                         continue
 
                     # 处理result-generated事件
@@ -208,11 +220,11 @@ class ASRProvider(ASRProviderBase):
                                 else:
                                     self.text = text
 
-                                # 手动模式下,只有在收到stop信号后才触发处理
-                                if conn.client_voice_stop:
-                                    logger.bind(tag=TAG).debug("收到最终识别结果，触发处理")
-                                    await self.handle_voice_stop(conn, audio_data)
-                                    break
+                                # 手动模式也立即触发处理: 说完一句就回复,
+                                # 不再等 stop 信号(否则双击/手动聆听的 ASR 结果会滞留 ~27s)
+                                logger.bind(tag=TAG).debug("收到最终识别结果，触发处理")
+                                await self.handle_voice_stop(conn, audio_data)
+                                break
                             else:
                                 # 自动模式下直接覆盖
                                 self.text = text

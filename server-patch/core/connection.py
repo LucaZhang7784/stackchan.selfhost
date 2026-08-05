@@ -268,6 +268,12 @@ class ConnectionHandler:
             self.logger.bind(tag=TAG).error(f"Connection error: {str(e)}-{stack_trace}")
             return
         finally:
+            import sys as _sys
+            _exc = _sys.exc_info()
+            self.logger.bind(tag=TAG).info(
+                f"receive loop end: exc={_exc[0].__name__ if _exc[0] else 'none'}, "
+                f"stop_event={self.stop_event.is_set()}, ws_closed={getattr(ws, 'closed', '?')}"
+            )
             try:
                 await self._save_and_close(ws)
             except Exception as final_error:
@@ -1527,6 +1533,7 @@ class ConnectionHandler:
     async def close(self, ws=None):
         """资源清理方法"""
         try:
+            self.logger.bind(tag=TAG).info("close() entered: 连接会话结束")
             from core import fusion_push
             fusion_push.unregister(self)
 

@@ -272,49 +272,67 @@ function Restore-BridgeIfDown {
 }
 
 # ---------------------------------------------------------------- 图标
+$script:iconCache = @{}
 function Get-StatusIcon {
     param([string]$state, [bool]$gw, [bool]$mcp, [bool]$robot)
-    $bmp = New-Object System.Drawing.Bitmap 32, 32
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $g.Clear([System.Drawing.Color]::Transparent)
+    $key = "$state|$gw|$mcp|$robot"
+    if ($script:iconCache.ContainsKey($key)) { return $script:iconCache[$key] }
+    try {
+        $bmp = New-Object System.Drawing.Bitmap 32, 32
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear([System.Drawing.Color]::Transparent)
 
-    # 健康色渐变背景
-    switch ($state) {
-        'ok'   { $c1 = [System.Drawing.Color]::FromArgb(46, 204, 113); $c2 = [System.Drawing.Color]::FromArgb(22, 160, 133); break }
-        'warn' { $c1 = [System.Drawing.Color]::FromArgb(243, 156, 18); $c2 = [System.Drawing.Color]::FromArgb(211, 84, 0);  break }
-        default{ $c1 = [System.Drawing.Color]::FromArgb(231, 76, 60);  $c2 = [System.Drawing.Color]::FromArgb(192, 57, 43); break }
-    }
-    $bgRect = New-Object System.Drawing.Rectangle 1, 1, 30, 30
-    $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush $bgRect, $c1, $c2, 45
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $d = 14
-    $path.AddArc(1, 1, $d, $d, 180, 90)
-    $path.AddArc(17, 1, $d, $d, 270, 90)
-    $path.AddArc(17, 17, $d, $d, 0, 90)
-    $path.AddArc(1, 17, $d, $d, 90, 90)
-    $path.CloseFigure()
-    $g.FillPath($brush, $path)
+        # 健康色渐变背景
+        switch ($state) {
+            'ok'   { $c1 = [System.Drawing.Color]::FromArgb(46, 204, 113); $c2 = [System.Drawing.Color]::FromArgb(22, 160, 133); break }
+            'warn' { $c1 = [System.Drawing.Color]::FromArgb(243, 156, 18); $c2 = [System.Drawing.Color]::FromArgb(211, 84, 0);  break }
+            default{ $c1 = [System.Drawing.Color]::FromArgb(231, 76, 60);  $c2 = [System.Drawing.Color]::FromArgb(192, 57, 43); break }
+        }
+        $bgRect = New-Object System.Drawing.Rectangle 3, 8, 26, 21
+        $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush $bgRect, $c1, $c2, 45
+        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $d = 8
+        $path.AddArc(3, 8, $d, $d, 180, 90)
+        $path.AddArc(29 - $d, 8, $d, $d, 270, 90)
+        $path.AddArc(29 - $d, 29 - $d, $d, $d, 0, 90)
+        $path.AddArc(3, 29 - $d, $d, $d, 90, 90)
+        $path.CloseFigure()
+        $g.FillPath($brush, $path)
 
-    # 三个状态点: 网关 / MCP / 机器人 (上 2 下 1)
-    $on  = [System.Drawing.Color]::White
-    $off = [System.Drawing.Color]::FromArgb(255, 255, 255, 160)
-    $dotBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
-    $dotOff   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(120, 255, 255, 255))
-    $positions = @(
-        @{ X = 11; Y = 11; On = $gw },
-        @{ X = 19; Y = 11; On = $mcp },
-        @{ X = 15; Y = 19; On = $robot }
-    )
-    foreach ($p in $positions) {
-        $b = if ($p.On) { $dotBrush } else { $dotOff }
-        $g.FillEllipse($b, $p.X, $p.Y, 5, 5)
+        # 机器人样式: 圆角头部 + 天线 + 两只眼睛 + 嘴巴
+        # 状态映射: 左眼=网关, 右眼=MCP, 天线灯=机器人
+        $dotBrush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
+        $dotOff   = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(120, 255, 255, 255))
+
+        # 天线杆 + 天线灯(机器人状态)
+        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(230, 255, 255, 255)), 2
+        $g.DrawLine($pen, 16, 8, 16, 3)
+        $antBrush = if ($robot) { $dotBrush } else { $dotOff }
+        $g.FillEllipse($antBrush, 13, 1, 6, 6)
+
+        # 左眼 = 网关, 右眼 = MCP
+        $eyeL = if ($gw)  { $dotBrush } else { $dotOff }
+        $g.FillEllipse($eyeL, 7, 14, 7, 7)
+        $eyeR = if ($mcp) { $dotBrush } else { $dotOff }
+        $g.FillEllipse($eyeR, 18, 14, 7, 7)
+
+        # 嘴巴(音箱格栅)
+        $g.FillRectangle($dotBrush, 11, 24, 10, 2)
+        $g.Dispose()
+        $hicon = $bmp.GetHicon()
+        $icon = [System.Drawing.Icon]::FromHandle($hicon)
+        $bmp.Dispose()
+        # 图标按状态缓存: 避免每 5 秒生成导致 GDI 句柄泄漏(GetHicon GDI+ 错误)
+        $script:iconCache[$key] = $icon
+        return $icon
+    } catch {
+        Write-TrayLog "Get-StatusIcon 生成失败, 降级缓存: $($_.Exception.Message)"
+        if ($script:iconCache.Count -gt 0) {
+            return $script:iconCache.Values | Select-Object -First 1
+        }
+        return $null
     }
-    $g.Dispose()
-    $hicon = $bmp.GetHicon()
-    $icon = [System.Drawing.Icon]::FromHandle($hicon)
-    $bmp.Dispose()
-    return $icon
 }
 
 # ---------------------------------------------------------------- 菜单
