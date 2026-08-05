@@ -50,11 +50,11 @@ ROOT = Path(__file__).resolve().parent
 
 DEFAULT_CONFIG = {
     "ota_url": "https://dahuilucaaaaa.tail61f3fa.ts.net/xiaozhi/ota/",
-    "robot_mac": "68:ee:8f:d7:3f:14",
+    "robot_mac": "AA:BB:CC:DD:EE:FF",
     "endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=REMOVED_EXPOSED_HEALTH_KEY",
     "docker_container": "xiaozhi-esp32-server",
     "docker_log_lookback_minutes": 120,
-    "auth_token": "REMOVED_EXPOSED_TOKEN",
+    "auth_token": "change-me-local-auth-token",
     "allow_codex": True,
     "allow_claude": True,
     "codex_cli": "codex",
@@ -65,7 +65,7 @@ DEFAULT_CONFIG = {
     "http_host": "0.0.0.0",
     "http_port": 8010,
     "push_api_url": "http://127.0.0.1:8003/api/push",
-    "push_secret": "REMOVED_EXPOSED_TOKEN",
+    "push_secret": "change-me-local-push-secret",
     "push_interval_s": 5,
 }
 
