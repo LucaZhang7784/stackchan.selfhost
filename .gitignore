@@ -1,0 +1,23 @@
+# 密钥 / 本地配置（绝不入库）
+.env
+server/.env
+server/data/.config.yaml
+server/data/.config.yaml.bak*
+server/data/.mcp_server_settings.json
+server/data/warp-ca.*
+gateway/config.json
+
+# 运行时数据 / 日志
+gateway/gateway.log
+gateway/heartbeat.json
+gateway/state/
+gateway/data/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# 本地构建中间产物
+firmware/build-phase71/
+restore-kit-*/

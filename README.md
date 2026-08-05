@@ -9,13 +9,13 @@
 ## 架构
 
 ```
-机器人 (CoreS3, 固件 v1.0.8-selfhost)
+机器人 (CoreS3, 固件 v1.1-phase7.1)
   │ 语音走 Tailscale Funnel 443 (局域网 AP 隔离, 不能直连)
   ▼
 Tailscale Funnel → funnel_proxy.py (8090) → xiaozhi-esp32-server (docker 8000/8003)
   │ ASR=阿里百炼 paraformer-realtime-v2 流式
   │ LLM=DeepSeek deepseek-v4-flash (关 reasoning)
-  │ TTS=EdgeTTS 粤语 (+20%)
+  │ TTS=EdgeTTS 粤语 (+20%) 流式 + 3 帧 Batch Pacing 平滑推流
   │ 工具: 服务端 MCP → 融合网关 (8010, 11 个工具)
   ▼
 融合网关 fusion_gateway.py → 4 个 agent (可见窗口执行, hooks 回流)
@@ -42,7 +42,8 @@ cd server
 # 准备配置
 cp data/.config.yaml.example data/.config.yaml   # 填入 YOUR_* 占位符
 cp .env.example .env                              # 填入密钥
-docker compose -f docker-compose.yml -f ../server-patch.yml up -d
+# 注意: fusion 覆盖挂载所有容器补丁(server-patch), 必须一起启动
+docker compose -f docker-compose.yml -f docker-compose.fusion.yml up -d --force-recreate
 ```
 
 ### 2. Funnel 代理
@@ -62,8 +63,11 @@ powershell -ExecutionPolicy Bypass -File run_gateway.ps1
 
 ### 4. 固件
 
-刷入 `firmware/post-fw-v1.0.8-selfhost/xiaozhi.bin` (app-only @ 0x410000),
+刷入 `firmware/post-fw-v1.1-phase7.1/xiaozhi.bin` (app-only @ 0x410000),
 或按 `firmware/patches/PATCHES.md` 用你自己的 OTA 地址重编译。
+
+> 恢复/迁移到新机器的完整步骤见 **`docs/restore.md`**;
+> 当日进展总结见 **`docs/summary-2026-08-05.md`**。
 
 ### 5. Prompt
 
@@ -75,12 +79,26 @@ powershell -ExecutionPolicy Bypass -File run_gateway.ps1
 
 | 目标 | 刷入固件 |
 |---|---|
-| 自建链路 | `firmware/post-fw-v1.0.8-selfhost/xiaozhi.bin` |
+| 自建链路 | `firmware/post-fw-v1.1-phase7.1/xiaozhi.bin` |
 | 云链路 (xiaozhi.me) | 历史 `post-fw-v1.0.6-ttsbuf/xiaozhi.bin` (OTA 默认 api.tenclass.net) |
 
 > 注意: 云固件无 OTA 地址守卫, 若 NVS 里残留过自建 wss 地址, 需先重新配网/清 NVS 的 wifi.ota_url。
 
 ## 更新日志
+
+### v1.1-phase7.1 (2026-08-05) — 平滑推流闭环 + ASR 识别增强
+
+- **回退实时语音**: 弃用 Qwen-Audio-Realtime/GLM, LLM=DeepSeek deepseek-v4-flash,
+  TTS=EdgeTTS zh-HK-HiuGaaiNeural 粤语女声 (+20%)。
+- **ASR 识别增强**: DashScope 热词表 `vocab-asong-*` (31 词) + `language_hints: ["zh","en"]`
+  + 同音纠错 (可头大/扣代码/扣德斯→Codex, 难体怪物体→Antigravity 等)。
+- **平滑推流**: 服务端 `sendAudioHandle.py` 3 帧 Batch Pacing (每 180ms 让出 10ms) +
+  LAST 后 20ms 再发 stop; 固件 EOF 机制 (`MarkPlaybackEof` → 队列排空才切待机),
+  实测推送播报尾音完整不掐、LED 不提前变暖橙。
+- **手势切断**: BMI270 摇晃/抱起、SI12T 摸头、滑动 100% 不再进 LLM (仅本地动画)。
+- **Prompt 铁律**: 「X 在做什么」→ agent_status (禁 agent_pending 答状态);
+  让 agent 做事必须同轮调 agent_query。
+- 修复 edge.py 预热 `wait_for` 语法错误; `sendAudioHandle.py` 纳入补丁挂载管线。
 
 ### v1.0.9 (2026-08-05) — 实时语音 (P7-1) + 链路稳定性 (P7-2)
 

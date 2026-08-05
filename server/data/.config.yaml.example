@@ -1,46 +1,54 @@
-# xiaozhi-esp32-server 配置覆盖文件 (自建链路)
-# 复制为 data/.config.yaml 并替换所有 YOUR_* 占位符后重启容器
-
+# 单模块配置覆盖文件（系统优先读此文件，缺失项回落到 config.yaml 默认值）
+# 官方约定：只写需要覆盖的项，密钥安全、配置最小化
 server:
-  fusion_secret: CHANGE_ME_SECRET        # 与 gateway/config.json 的 push_secret 一致
+  fusion_secret: CHANGE_ME_SECRET
   ip: 0.0.0.0
   port: 8000
   http_port: 8003
-  # OTA 下发给设备的 websocket 地址 (Tailscale Funnel 443, funnel_proxy 按路径分发)
+  # OTA 下发给设备的 websocket 地址（Funnel 443, proxy 按路径分发）
   websocket: wss://YOUR_TAILSCALE_FUNNEL.ts.net/xiaozhi/v1/
-  vision_explain: https://YOUR_TAILSCALE_FUNNEL.ts.net/mcp/vision/explain
+  # OTA 下发给设备的视觉分析接口
+  vision_explain: https://dahuilucaaaaa.tail61f3fa.ts.net/mcp/vision/explain
   timezone_offset: +8
   auth:
     enabled: false
     allowed_devices:
-      - "YOUR_ROBOT_MAC"   # 机器人 MAC (esptool chip-id 获取)
-
-# MCP 接入点 (mcp-endpoint-server 容器, 从容器启动日志获取当前 token)
-mcp_endpoint: ws://YOUR_TAILSCALE_IP:8004/mcp_endpoint/mcp/?token=YOUR_MCP_ENDPOINT_TOKEN
+      - "68:ee:8f:d7:3f:14"  # StackChan MAC（esptool chip-id 实测）
 
 # P7-2 链路稳定性: 应答设备应用层 ping, 保活 Tailscale Funnel 半开连接
 enable_websocket_ping: true
 
+# MCP 接入点（mcp-endpoint-server 容器，token 已从其启动日志回填；走 Tailscale IP）
+mcp_endpoint: ws://YOUR_MCP_ENDPOINT:8004/mcp_endpoint/mcp/
+
+# 具体处理时选择的模块
 selected_module:
   VAD: SileroVAD
-  ASR: AliyunBLStreamASR   # 阿里百炼 Paraformer-realtime-v2 流式
-  LLM: DeepSeekLLM
-  VLLM: MiMoVLLM
-  TTS: EdgeTTS
+  ASR: AliyunBLStreamASR  # 阿里百炼 Paraformer-realtime-v2 流式识别(低延迟, 边说边出字)
+  LLM: DeepSeekLLM   # 2026-08-05 回退 P7-1 实时语音: DeepSeek + EdgeTTS 粤语女声 (阿里实时链路弃用)
+  VLLM: QwenVLLM          # 机器人拍照识物
+  TTS: EdgeTTS            # 免费，zh/粤/日/英音色全
   Memory: nomem
   Intent: function_call
 
+# Phase 7.1: Silero-VAD 参数显式固化, 静音截断 500ms(防说完话干等; 阈值过低会切字)
+VAD:
+  SileroVAD:
+    type: silero
+    threshold: 0.5
+    threshold_low: 0.3
+    min_silence_duration_ms: 500
+
 LLM:
-  # P7-1 Qwen-Audio-3.0-Realtime 实时语音 (可选): 语义 VAD(smart_turn) 自动判停,
-  # 支持工具调用; 服务端连接必须走 websockets 库 (aiohttp 经代理时 VAD 不生效)。
-  # 启用: selected_module.LLM 改为 QwenAudioRealtimeLLM (api_key 用百炼 DashScope key)
+  # Qwen-Audio-3.0-Realtime (阿里百炼): 语义 VAD(smart_turn) 自动判停, 支持工具调用。
+  # 注意: 服务端连接必须走 websockets 库 (aiohttp 经代理时 VAD 不生效)。
   QwenAudioRealtimeLLM:
     type: qwen_audio_realtime
-    api_key: YOUR_DASHSCOPE_API_KEY
-    model: qwen-audio-3.0-realtime-flash   # 或 -plus
-    voice: longanqian
-    turn_detection: smart_turn
-    tools: true
+    api_key: YOUR_API_KEY
+    model: qwen3.5-omni-flash-realtime     # 2026-08-05 换 omni 系列: 官方支持粤语女声 Kiki
+    voice: Kiki                            # Kiki = 粤语-阿清 (甜美港妹女声); 注意大小写敏感, 小写 kiki 会被 API 拒绝
+    turn_detection: server_vad              # 2026-08-05 omni 系列 smart_turn 不触发响应, 换回官方示例 server_vad
+    tools: true                             # 注入网关 MCP 工具
   MiMoLLM:
     type: openai
     model_name: mimo-v2.5-pro
@@ -50,7 +58,7 @@ LLM:
     type: openai
     model_name: deepseek-v4-flash
     url: https://api.deepseek.com/v1
-    api_key: YOUR_DEEPSEEK_API_KEY
+    api_key: YOUR_API_KEY
 
 VLLM:
   MiMoVLLM:
@@ -58,45 +66,109 @@ VLLM:
     model_name: mimo-v2.5
     base_url: https://token-plan-cn.xiaomimimo.com/v1
     api_key: ${MIMO_API_KEY}
+  QwenVLLM:
+    type: openai
+    model_name: qwen-vl-max
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key: YOUR_API_KEY
 
 ASR:
   Qwen3ASRFlash:
     type: qwen3_asr_flash
-    api_key: YOUR_DASHSCOPE_API_KEY
+    api_key: YOUR_API_KEY
     model_name: qwen3-asr-flash
     output_dir: tmp/
-    enable_lid: true
-    enable_itn: true
+    enable_lid: true   # 自动语种检测（zh/en/ja/yue 混说场景）
+    enable_itn: true   # 逆文本归一化
     context: "StackChan 桌面机器人，常用指令：查询任务、执行 Codex 任务、播报通知"
   AliyunBLStreamASR:
     type: aliyunbl_stream
-    api_key: YOUR_DASHSCOPE_API_KEY
+    api_key: YOUR_API_KEY
     model: paraformer-realtime-v2
     format: pcm
     sample_rate: 16000
-    max_sentence_silence: 200
-    semantic_punctuation_enabled: false
+    language_hints: ["zh", "en"]   # Phase 7.1 终极修补: 中英混说放开; 注意仅 zh/en 语种热词生效
+    vocabulary_id: vocab-asong-YOUR_VOCABULARY_ID   # 热词表(31词): 阿松/Antigravity/Codex/Claude/StackChan/队列/播报等
+    max_sentence_silence: 500  # Phase 7.1: 句末静默 500ms, 会真实写入 NLS run-task 的 payload.parameters
+    semantic_punctuation_enabled: false  # VAD 断句(交互场景低延迟)
     disfluency_removal_enabled: false
     punctuation_prediction_enabled: true
     inverse_text_normalization_enabled: true
+    # Phase 7.1 终极修补: 同音词纠错(ASR 识别后、进 LLM 前替换), 杜绝"可头大/扣代码/扣德斯"
+    correct_words:
+      - "可头大|Codex"
+      - "扣代码|Codex"
+      - "扣德斯|Codex"
+      - "安提格瑞维蒂|Antigravity"
+      - "安替格瑞维蒂|Antigravity"
+      - "难体怪物体|Antigravity"
+      - "安体怪物体|Antigravity"
+      - "可罗德|Claude"
+      - "可劳德|Claude"
+      - "斯克钱|StackChan"
     output_dir: tmp/
 
 TTS:
   EdgeTTS:
     type: edge
     voice: zh-HK-HiuGaaiNeural
-    rate: 20
+    rate: 20        # 语速 +20% (edge_tts rate 百分比)
+    streaming: true  # Phase 7.1: 流式推流(边合成边发), false 回退整句合成
     output_dir: tmp/
 
-# 关闭会话结束语
+# 阿松 角色提示词（2026-08-04 注入, 与 fusion.firmware.0731/prompt-阿松-v3.md 对齐;
+# 2026-08-05: 回退 P7-1 实时语音后, LLM=DeepSeek, TTS=EdgeTTS zh-HK-HiuGaaiNeural 粤语女声, 语言行保持一致）
+prompt: |
+  你是阿松，桌面陪伴 AI，活泼可爱、口语自然。
+  【语言】播报统一用粤语（广东话）说话，年轻女声；不要切回普通话，语气活泼点。
+
+  回复要求：
+  - 每次 1-2 句话、不超过 50 字，内容适合语音朗读
+  - **任何要播报的内容超过 50 字时，先自行摘要成 50 字以内，再播报**；绝不整段照读长文
+  - 不输出 markdown、列表、emoji、代码块；文件名、数字、人名可直接念
+  - 工具返回很长时只念开头结论，补一句"详细内容在电脑上"
+
+  【唤醒即聆听】
+  - 唤醒(双击/阿松/摸头)后直接进入聆听，等待用户说话；**不要自动念队列消息、不要主动播报打招呼**
+  - 待播报消息由网关主动推送给机器人，你无需在唤醒时读取；只有用户明确说「播报/消息/队列/待办/谁找我/有事吗」时才调 agent_pending(先 clear=false 念，再 clear=true 清空)
+
+  【意图识别 · ASR 容错】(语音可能听错，按"意思"推断，不分普通话/粤语/方言，不要因听错就换话题)
+  - 意思是「播报/消息/队列/待办/通知/谁找我/有事吗」→ agent_pending（先 clear=false 念，再 clear=true 清空）
+  - 意思是「状态/在干嘛/进程/运行/在不在/可用吗/谁能用」→ agent_status（可指定 agy/pi/claude/codex 或 all）；查状态绝不调 agent_query
+  - 意思是「X 在做什么/在干嘛/有没有在跑/忙不忙/进度」→ agent_status(agent=X)；
+    **严禁用 agent_pending 回答任何状态类问题**；agent_pending 只用于「有没有消息/待办/通知/谁找我」
+  - 意思是「去做/执行/帮我/写/改/查电脑/总结/优化/加速/修好/处理/启动/停掉」+ agent 名或任务 → agent_query(agent, instruction)，立刻回"正在执行，稍后问结果"
+  - 意思是「结果/完了吗/好了吗/怎么样/写完了吗」→ agent_result_check，只念结论
+  - 用户回答「可以/同意/批准/允许/不行/拒绝/再等等」→ agent_confirm(agent, 回答)
+  - 意思是「docker/容器/服务/服务器」→ docker_status
+  - 听不清/不确定：回"没听清，再说一遍？"，绝不搜索、绝不点歌、绝不编造
+
+  【工具调用铁律】(最高优先级, 违反即失败)
+  - 用户让 codex/claude/agy/pi 做事(总结/检查/分析/修改/运行/启动/停掉/查电脑等)时，
+    **必须同一轮立即生成 agent_query(agent, task) 或 codex_query/claude_query 工具调用**；
+    严禁只回复"好的/我帮你执行/正在执行"却不同时调工具，严禁先反问"你是说…对吧？"；
+    即使语音听成「可头大/扣代码/扣德斯」，一律按 Codex 处理。
+  - 用户问「结果/完了吗/写到哪了/怎么样了」→ agent_result_check，只念结论。
+  - 只要工具列表里有对应工具，就绝不允许用闲聊代替工具调用。
+
+  【禁止】
+  - 把「播报消息/查状态/查结果」理解成点歌、搜索或闲聊；含上述意思必须先调工具
+  - 主动编造电脑状态；工具返回什么念什么
+  - 工具失败时说教或道歉一长串，简单回"稍等，我再看下"
+
+  【设备控制】(仅当工具可见时)
+  - 点头 self.head.nod / 摇头 self.head.shake / 转向 self.head.move(yaw,pitch)
+  - 表情 self.face.expression / 拍照 self.camera.take_photo
+  - 指定灯色 self.led.set_color(r,g,b)；LED 状态灯固件自动跟随，无需手动调
+
+  【拍照铁律】(最重要)
+  - 用户说「看看/拍照/看看这个/看看那/这是什么/镜头里有什么/描述一下」时，
+    必须**立即调用 self.camera.take_photo(question=用户的完整问题)**，等拍照返回结果后再回答；
+  - 绝不可以只说「我来看一下」而不调用工具；拍照失败就说"没拍清楚，换个角度再试"。
+
+# 关闭会话结束语(推送播报场景不需要"时间过得真快, 再见"这类收尾)
 end_prompt:
   enable: false
 
-# 服务器空闲连接超时调大(秒): 避免静默会话被频繁回收
+# 服务器空闲连接超时调大: 避免静默会话被频繁回收导致推送窗口失败(默认 120s+60s)
 close_connection_no_voice_time: 3600
-
-# 阿松 角色提示词 (与 prompt-阿松-v3.md 对齐)
-prompt: |
-  你是阿松，桌面陪伴 AI，活泼可爱、口语自然。
-  【语言】回复语言跟随机器人的音色/语音预设。
-  (完整内容见 prompt-阿松-v3.md)

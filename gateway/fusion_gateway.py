@@ -49,12 +49,12 @@ import agents_core
 ROOT = Path(__file__).resolve().parent
 
 DEFAULT_CONFIG = {
-    "ota_url": "https://dahuilucaaaaa.tail61f3fa.ts.net/xiaozhi/ota/",
-    "robot_mac": "AA:BB:CC:DD:EE:FF",
-    "endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=9b55e82e498c4710b94a73d88ad1be3e",
+    "ota_url": "https://YOUR_TAILSCALE_FUNNEL.ts.net/xiaozhi/ota/",
+    "robot_mac": "YOUR_ROBOT_MAC",
+    "endpoint_health_url": "http://127.0.0.1:8004/mcp_endpoint/health?key=YOUR_HEALTH_KEY",
     "docker_container": "xiaozhi-esp32-server",
     "docker_log_lookback_minutes": 120,
-    "auth_token": "change-me-local-auth-token",
+    "auth_token": "CHANGE_ME_TOKEN",
     "allow_codex": True,
     "allow_claude": True,
     "codex_cli": "codex",
@@ -65,7 +65,7 @@ DEFAULT_CONFIG = {
     "http_host": "0.0.0.0",
     "http_port": 8010,
     "push_api_url": "http://127.0.0.1:8003/api/push",
-    "push_secret": "change-me-local-push-secret",
+    "push_secret": "CHANGE_ME_SECRET",
     "push_interval_s": 5,
 }
 
@@ -76,6 +76,7 @@ TOOL_NAMES = [
 ]
 
 STARTED_AT = time.time()
+PENDING_TTL_SECONDS = 300  # Phase 7.1: 待播报消息 5 分钟 TTL, 根治开机/重启后倒灌旧消息
 CFG: dict = {}
 
 
@@ -91,6 +92,15 @@ def log(message: str) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _is_expired(created_at: str) -> bool:
+    """判断条目是否超过 5 分钟 TTL(解析失败保守保留)。"""
+    try:
+        ts = datetime.fromisoformat(created_at)
+        return (datetime.now(ts.tzinfo) - ts).total_seconds() > PENDING_TTL_SECONDS
+    except Exception:
+        return False
 
 
 def load_config(config_path: str | None = None) -> dict:
@@ -165,7 +175,17 @@ def pending_items() -> list[dict]:
                     items.append(json.loads(line))
                 except Exception:
                     items.append({"id": "", "text": line, "source": "legacy", "created_at": ""})
-    return items
+    # Phase 7.1: 5 分钟 TTL - 丢弃过期旧消息并物理清理, 防重启后倒灌
+    fresh = [o for o in items if not _is_expired(o.get("created_at", ""))]
+    if len(fresh) != len(items):
+        log(f"pending TTL: 丢弃 {len(items) - len(fresh)} 条过期消息(>5min)")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for o in fresh:
+                    f.write(json.dumps(o, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+    return fresh
 
 
 def pending_remove_ids(ids: set[str]) -> int:

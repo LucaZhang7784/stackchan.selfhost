@@ -4,7 +4,7 @@ CONFIG_SPIRAM_MODE_QUAD=y
 # 自建链路 OTA 默认地址 (v1.0.7-selfhost; 覆盖 Kconfig 默认的 api.tenclass.net)
 # 回滚云链路 = 手动 app-only 刷 v1.0.6-ttsbuf (注意: 云固件无 OTA 守卫,
 # 需先清 NVS wifi.ota_url 或重新配网, 详见 README)
-CONFIG_OTA_URL="https://dahuilucaaaaa.tail61f3fa.ts.net:443/xiaozhi/ota/"
+CONFIG_OTA_URL="https://YOUR_TAILSCALE_FUNNEL.ts.net:443/xiaozhi/ota/"
 
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_COMPILER_CXX_EXCEPTIONS=y
