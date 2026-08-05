@@ -18,6 +18,9 @@ server:
 # MCP 接入点 (mcp-endpoint-server 容器, 从容器启动日志获取当前 token)
 mcp_endpoint: ws://YOUR_TAILSCALE_IP:8004/mcp_endpoint/mcp/?token=YOUR_MCP_ENDPOINT_TOKEN
 
+# P7-2 链路稳定性: 应答设备应用层 ping, 保活 Tailscale Funnel 半开连接
+enable_websocket_ping: true
+
 selected_module:
   VAD: SileroVAD
   ASR: AliyunBLStreamASR   # 阿里百炼 Paraformer-realtime-v2 流式
@@ -28,6 +31,14 @@ selected_module:
   Intent: function_call
 
 LLM:
+  # P7-1 GLM-Realtime 实时语音 (可选): 端到端语音, 支持打断与 function calling。
+  # 启用: selected_module.LLM 改为 GLMRealtimeLLM + 填写 api_key (https://bigmodel.cn 申请)
+  GLMRealtimeLLM:
+    type: glm_realtime
+    api_key: YOUR_ZHIPU_API_KEY
+    model: glm-realtime-flash   # 或 glm-realtime-air
+    voice: tongtong
+    tools: true
   MiMoLLM:
     type: openai
     model_name: mimo-v2.5-pro
