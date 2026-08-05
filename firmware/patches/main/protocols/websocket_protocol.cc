@@ -17,6 +17,7 @@ WebsocketProtocol::WebsocketProtocol() {
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
+    StopKeepalive();
     vEventGroupDelete(event_group_handle_);
 }
 
@@ -72,7 +73,9 @@ bool WebsocketProtocol::SendText(const std::string& text) {
 }
 
 bool WebsocketProtocol::IsAudioChannelOpened() const {
-    return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
+    // IsTimeout() 会把"空闲 120s 的会话"误判为断开, 导致预热任务每 2s 空转重连;
+    // 连接是否可用以 websocket 真实状态为准
+    return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_;
 }
 
 bool WebsocketProtocol::IsStale(int max_idle_s) const {
@@ -85,6 +88,7 @@ bool WebsocketProtocol::IsStale(int max_idle_s) const {
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
+    StopKeepalive();
     std::lock_guard<std::mutex> lock(connect_mutex_);
     websocket_.reset();
 }
@@ -217,7 +221,47 @@ bool WebsocketProtocol::OpenAudioChannel(bool silent) {
         on_audio_channel_opened_();
     }
 
+    StartKeepalive();
     return true;
+}
+
+void WebsocketProtocol::StartKeepalive() {
+    // P7-2: 30s 应用层 ping, 文本帧可穿透 Tailscale Funnel 代理,
+    // 服务端 enable_websocket_ping: true 时回 pong, 保持链路活跃并重置空闲计时。
+    std::lock_guard<std::mutex> lock(connect_mutex_);
+    if (keepalive_running_) {
+        return;
+    }
+    keepalive_running_ = true;
+    keepalive_thread_ = std::thread([this]() {
+        int elapsed = 0;
+        while (elapsed < 30) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            {
+                std::lock_guard<std::mutex> lock(connect_mutex_);
+                if (!keepalive_running_) {
+                    return;
+                }
+            }
+            elapsed++;
+        }
+        {
+            std::lock_guard<std::mutex> lock(connect_mutex_);
+            if (keepalive_running_ && websocket_ != nullptr && websocket_->IsConnected()) {
+                SendText("{\"type\":\"ping\"}");
+            }
+        }
+    });
+}
+
+void WebsocketProtocol::StopKeepalive() {
+    {
+        std::lock_guard<std::mutex> lock(connect_mutex_);
+        keepalive_running_ = false;
+    }
+    if (keepalive_thread_.joinable()) {
+        keepalive_thread_.join();
+    }
 }
 
 std::string WebsocketProtocol::GetHelloMessage() {

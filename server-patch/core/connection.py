@@ -379,6 +379,16 @@ class ConnectionHandler:
             if self.vad is None or self.asr is None:
                 return
 
+            # GLM-Realtime 实时语音链路: 音频直达实时会话, 绕过 VAD/ASR/LLM/TTS 三段式
+            if getattr(self.llm, "is_realtime", False):
+                pcm_frame = self._decode_opus_packet(message)
+                if pcm_frame:
+                    try:
+                        await self.llm.send_audio(pcm_frame)
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).debug(f"实时音频转发失败: {e}")
+                return
+
             # 处理来自MQTT网关的音频包
             if self.conn_from_mqtt_gateway and len(message) >= 16:
                 handled = await self._process_mqtt_audio_message(message)
@@ -619,6 +629,11 @@ class ConnectionHandler:
             asyncio.run_coroutine_threadsafe(
                 self.tts.open_audio_channels(self), self.loop
             )
+
+            # GLM-Realtime: TTS 通道就绪后启动实时会话
+            if getattr(self.llm, "is_realtime", False) and hasattr(self.llm, "start"):
+                asyncio.run_coroutine_threadsafe(self.llm.start(self), self.loop)
+
             if self.need_bind:
                 self.bind_completed_event.set()
                 return
@@ -1537,6 +1552,13 @@ class ConnectionHandler:
             from core import fusion_push
             fusion_push.unregister(self)
 
+            # GLM-Realtime: 关闭实时会话
+            if getattr(self.llm, "is_realtime", False) and hasattr(self.llm, "stop"):
+                try:
+                    await self.llm.stop()
+                except Exception as e:
+                    self.logger.bind(tag=TAG).debug(f"实时链路关闭失败: {e}")
+
             # 清理 VAD 连接资源
             if (
                     hasattr(self, "vad")
@@ -1655,6 +1677,15 @@ class ConnectionHandler:
 
     def clear_queues(self):
         """清空所有任务队列"""
+        # GLM-Realtime: 打断/清空时取消当前响应与输入缓冲
+        if getattr(self.llm, "is_realtime", False) and hasattr(self.llm, "cancel"):
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.llm.cancel(), self.loop
+                )
+                future.result(timeout=3)
+            except Exception as e:
+                self.logger.bind(tag=TAG).debug(f"实时链路取消失败: {e}")
         if self.tts:
             self.logger.bind(tag=TAG).debug(
                 f"开始清理: TTS队列大小={self.tts.tts_text_queue.qsize()}, 音频队列大小={self.tts.tts_audio_queue.qsize()}"

@@ -6,6 +6,7 @@
 
 #include <web_socket.h>
 #include <mutex>
+#include <thread>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 
@@ -27,9 +28,13 @@ private:
     EventGroupHandle_t event_group_handle_;
     std::unique_ptr<WebSocket> websocket_;
     std::mutex connect_mutex_;
+    std::thread keepalive_thread_;
+    bool keepalive_running_ = false;
     int version_ = 1;
 
     void ParseServerHello(const cJSON* root);
+    void StartKeepalive();
+    void StopKeepalive();
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();
 };
