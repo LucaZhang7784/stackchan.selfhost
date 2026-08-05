@@ -36,12 +36,19 @@ class ListenTextMessageHandler(TextMessageHandler):
         if msg_json["state"] == "start":
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             conn.reset_audio_states()
+            # GLM-Realtime: 新一轮聆听前清空实时输入缓冲
+            if getattr(conn.llm, "is_realtime", False) and hasattr(conn.llm, "clear_buffer"):
+                await conn.llm.clear_buffer()
         elif msg_json["state"] == "stop":
             # 收到stop但asr未初始化，跳过处理
             if conn.asr is None:
                 return
 
             conn.client_voice_stop = True
+            # GLM-Realtime (client_vad): 设备 VAD 判停 -> 提交音频并触发回复
+            if getattr(conn.llm, "is_realtime", False) and hasattr(conn.llm, "commit_and_respond"):
+                await conn.llm.commit_and_respond()
+                return
             if conn.asr.interface_type == InterfaceType.STREAM:
                 # 流式模式下，发送结束请求
                 asyncio.create_task(conn.asr._send_stop_request())
@@ -56,6 +63,9 @@ class ListenTextMessageHandler(TextMessageHandler):
         elif msg_json["state"] == "detect":
             conn.client_have_voice = False
             conn.reset_audio_states()
+            # GLM-Realtime: 唤醒后清空缓冲, 开启新一轮
+            if getattr(conn.llm, "is_realtime", False) and hasattr(conn.llm, "clear_buffer"):
+                await conn.llm.clear_buffer()
             if "text" in msg_json:
                 conn.last_activity_time = time.time() * 1000
                 original_text = msg_json["text"]  # 保留原始文本

@@ -10,7 +10,7 @@ services:
       - ./server-patch/core/http_server.py:/opt/xiaozhi-esp32-server/core/http_server.py:ro
       - ./server-patch/core/websocket_server.py:/opt/xiaozhi-esp32-server/core/websocket_server.py:ro
       - ./server-patch/core/providers/llm/openai/openai.py:/opt/xiaozhi-esp32-server/core/providers/llm/openai/openai.py:ro
-      - ./server-patch/core/providers/llm/glm_realtime:/opt/xiaozhi-esp32-server/core/providers/llm/glm_realtime:ro
+      - ./server-patch/core/providers/llm/qwen_audio_realtime:/opt/xiaozhi-esp32-server/core/providers/llm/qwen_audio_realtime:ro
       - ./server-patch/core/providers/asr/aliyunbl_stream.py:/opt/xiaozhi-esp32-server/core/providers/asr/aliyunbl_stream.py:ro
       - ./server-patch/core/providers/asr/base.py:/opt/xiaozhi-esp32-server/core/providers/asr/base.py:ro
       - ./server-patch/core/handle/textHandler/listenMessageHandler.py:/opt/xiaozhi-esp32-server/core/handle/textHandler/listenMessageHandler.py:ro

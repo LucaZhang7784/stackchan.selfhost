@@ -31,13 +31,15 @@ selected_module:
   Intent: function_call
 
 LLM:
-  # P7-1 GLM-Realtime 实时语音 (可选): 端到端语音, 支持打断与 function calling。
-  # 启用: selected_module.LLM 改为 GLMRealtimeLLM + 填写 api_key (https://bigmodel.cn 申请)
-  GLMRealtimeLLM:
-    type: glm_realtime
-    api_key: YOUR_ZHIPU_API_KEY
-    model: glm-realtime-flash   # 或 glm-realtime-air
-    voice: tongtong
+  # P7-1 Qwen-Audio-3.0-Realtime 实时语音 (可选): 语义 VAD(smart_turn) 自动判停,
+  # 支持工具调用; 服务端连接必须走 websockets 库 (aiohttp 经代理时 VAD 不生效)。
+  # 启用: selected_module.LLM 改为 QwenAudioRealtimeLLM (api_key 用百炼 DashScope key)
+  QwenAudioRealtimeLLM:
+    type: qwen_audio_realtime
+    api_key: YOUR_DASHSCOPE_API_KEY
+    model: qwen-audio-3.0-realtime-flash   # 或 -plus
+    voice: longanqian
+    turn_detection: smart_turn
     tools: true
   MiMoLLM:
     type: openai
