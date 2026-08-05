@@ -379,7 +379,7 @@ class ConnectionHandler:
             if self.vad is None or self.asr is None:
                 return
 
-            # GLM-Realtime 实时语音链路: 音频直达实时会话, 绕过 VAD/ASR/LLM/TTS 三段式
+            # 实时语音链路: 音频直达实时会话, 绕过 VAD/ASR/LLM/TTS 三段式
             if getattr(self.llm, "is_realtime", False):
                 pcm_frame = self._decode_opus_packet(message)
                 if pcm_frame:
@@ -630,10 +630,6 @@ class ConnectionHandler:
                 self.tts.open_audio_channels(self), self.loop
             )
 
-            # GLM-Realtime: TTS 通道就绪后启动实时会话
-            if getattr(self.llm, "is_realtime", False) and hasattr(self.llm, "start"):
-                asyncio.run_coroutine_threadsafe(self.llm.start(self), self.loop)
-
             if self.need_bind:
                 self.bind_completed_event.set()
                 return
@@ -675,6 +671,10 @@ class ConnectionHandler:
             self._init_prompt_enhancement()
             """注入工具调用few-shot示例（仅function_call模式）"""
             self._inject_tool_call_fewshot()
+
+            # 实时语音: 所有组件就绪后启动实时会话 (prompt/工具已就绪)
+            if getattr(self.llm, "is_realtime", False) and hasattr(self.llm, "start"):
+                asyncio.run_coroutine_threadsafe(self.llm.start(self), self.loop)
 
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
@@ -1552,7 +1552,7 @@ class ConnectionHandler:
             from core import fusion_push
             fusion_push.unregister(self)
 
-            # GLM-Realtime: 关闭实时会话
+            # 实时语音: 关闭实时会话
             if getattr(self.llm, "is_realtime", False) and hasattr(self.llm, "stop"):
                 try:
                     await self.llm.stop()
@@ -1677,13 +1677,12 @@ class ConnectionHandler:
 
     def clear_queues(self):
         """清空所有任务队列"""
-        # GLM-Realtime: 打断/清空时取消当前响应与输入缓冲
+        # 实时语音: 打断/清空时取消当前响应与输入缓冲
         if getattr(self.llm, "is_realtime", False) and hasattr(self.llm, "cancel"):
             try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self.llm.cancel(), self.loop
-                )
-                future.result(timeout=3)
+                # 只调度不阻塞: clear_queues 常在事件循环线程被调用,
+                # .result() 会卡死循环导致 cancel 永远不执行 (client_abort 卡 True)
+                asyncio.run_coroutine_threadsafe(self.llm.cancel(), self.loop)
             except Exception as e:
                 self.logger.bind(tag=TAG).debug(f"实时链路取消失败: {e}")
         if self.tts:

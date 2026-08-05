@@ -18,7 +18,10 @@ async def proxy_ws_to_backend(request):
     # Accept the incoming WS connection from Funnel
     ws_in = web.WebSocketResponse(
         max_msg_size=1024 * 1024,  # 1MB
-        heartbeat=30.0,
+        # 设备侧不做代理心跳: ESP32 不回协议层 pong 时, aiohttp 会在
+        # heartbeat*2 (60s) 后强制断开连接 -> 每 60-90s 掉线重连的根因。
+        # 链路保活改由后端 websockets ping (代理自动 pong) + 设备应用层 ping 承担。
+        heartbeat=None,
     )
     await ws_in.prepare(request)
 
@@ -34,7 +37,7 @@ async def proxy_ws_to_backend(request):
                     hdrs[k] = v
 
             async with session.ws_connect(
-                target, headers=hdrs, max_msg_size=1024 * 1024
+                target, headers=hdrs, max_msg_size=1024 * 1024, heartbeat=15
             ) as ws_out:
                 # Bidirectional relay
                 async def relay(src, dst, name):
@@ -97,6 +100,8 @@ def create_app():
     # All other (including /xiaozhi/v1/) -> WS proxy to port 8000
     app = web.Application()
     app.router.add_route("*", "/xiaozhi/ota/{tail:.*}", proxy_http_to_backend)
+    # 视觉分析上传是 HTTP multipart, 必须走 8003 (不能按默认 WS 转发)
+    app.router.add_route("*", "/mcp/vision/{tail:.*}", proxy_http_to_backend)
     app.router.add_route("*", "/{tail:.*}", proxy_ws_to_backend)
     return app
 

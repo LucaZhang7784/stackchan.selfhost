@@ -15,10 +15,12 @@
 ## 二、Phase 7 目标: 从「能用」到「好用」
 
 ### P7-1 实时语音链路 (最高优先)
-- **接入 OpenAI Realtime / Gemini Live 实时语音** (参考 stackchan_ha_addons):
-  端到端语音对话, 消除「ASR→LLM→TTS」三段延迟, 支持打断式对话。
-- 保留现 paraformer 流式链路作备选, 可配置切换。
-- 预期: 端到端延迟 从 ~5s 降到 ~1s, 并天然支持语音打断。
+- **✅ 已完成 (2026-08-05)**: 接入 **Qwen-Audio-3.0-Realtime** (阿里百炼)。
+  端到端语音, 语义 VAD(smart_turn) 自动判停, 支持打断与 Function Calling;
+  屏幕双向显示用户转写与回复文本。详见 `docs/p7-qwen-realtime.md`。
+- 备选: 豆包实时语音 3.0 (邀测)、讯飞超拟人 (传统 SDK); OpenAI/Gemini
+  需海外 key + 网络 (本机 WARP 可满足网络前提)。
+- 预期达成: 端到端延迟 ~1-2s, 天然支持语音打断。
 
 ### P7-2 链路稳定性
 - Funnel 抖动治理: 增加「直连 Tailscale 节点」备线(同 tailnet 时), Funnel 故障自动切换;

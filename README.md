@@ -82,6 +82,20 @@ powershell -ExecutionPolicy Bypass -File run_gateway.ps1
 
 ## 更新日志
 
+### v1.0.9 (2026-08-05) — 实时语音 (P7-1) + 链路稳定性 (P7-2)
+
+- **实时语音链路**: 新增 **Qwen-Audio-3.0-Realtime** provider (阿里百炼),
+  端到端语音替代 ASR→LLM→TTS 三段式; 语义 VAD (smart_turn) 自动判停;
+  支持网关 MCP 工具调用、双击打断、屏幕双向显示 (用户转写 + 回复文本)。
+  切换: `selected_module.LLM = QwenAudioRealtimeLLM` (回退 DeepSeekLLM 无需刷固件)。
+- **弃用 GLM-Realtime**: 实测判停不可靠 (aiohttp 客户端问题 + 服务端 VAD 缺陷),
+  相关代码/配置已移除。
+- **修 4 个真坑**: ① aiohttp 客户端导致实时 API VAD 不触发 → 改用 websockets 库;
+  ② websockets 14 无 `.closed` 属性 → 用 `close_code` 判断; ③ 播报无声 →
+  回复前补发 `tts start`; ④ 设备连接每 60-90s 被断 → Funnel 代理 aiohttp
+  `heartbeat=30` 对不回 pong 的 ESP32 强制断开 → 设备侧改为 `heartbeat=None`。
+- **服务端 WS ping 显式化**: `ping_interval=15s`, 及时探测半开连接。
+
 ### v1.0.8 (2026-08-04) — 唤醒可靠性
 
 - **修复「唤醒无反应」**: 预热通道已打开时, 唤醒直连路径因 `ContinueWakeWordInvoke` 要求

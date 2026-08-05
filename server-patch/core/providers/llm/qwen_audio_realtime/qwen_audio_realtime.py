@@ -1,16 +1,17 @@
-"""GLM-Realtime 实时语音 LLM (智谱 bigmodel.cn)
+"""Qwen-Audio-3.0-Realtime 实时语音 LLM (阿里云百炼 / DashScope)
 
-端到端语音对话: 设备 PCM(16k) -> input_audio_buffer.append ->
-GLM-Realtime(server VAD 自动断句/打断) -> response.audio.delta(24k PCM)
+端到端实时双工语音: 设备 PCM(16k) -> input_audio_buffer.append(裸PCM base64)
+-> 语义 VAD(smart_turn, 自动判停/不误打断) -> response.audio.delta(24k PCM)
 -> 重采样 16k -> opus -> 设备。
 
-选择 GLM-Realtime 的原因 (2026-08 调研):
-- DeepSeek / Kimi / MiMo 无官方 realtime 语音 API;
-- 智谱官方 WebSocket 实时音视频 API, 支持打断与 function calling;
-- 协议与 OpenAI Realtime 同构, 价格: glm-realtime-flash 0.18 元/分钟。
+选择理由 (2026-08 调研):
+- 阿里百炼官方 WebSocket 实时语音 API, 中国大陆直连, 无需翻墙;
+- 语义 VAD(smart_turn) 解决 GLM server_vad 判停不可靠的问题;
+- 支持 Function Calling, 可注入网关 MCP 工具;
+- 复用现有 DashScope API Key。
 
-用法: .config.yaml 中 selected_module.LLM = GLMRealtimeLLM 并填写
-LLM.GLMRealtimeLLM.api_key (https://bigmodel.cn 申请)。
+参考: aliyun/alibabacloud-bailian-speech-demo
+  (samples/conversation/fun-audiochat-realtime)
 """
 
 import asyncio
@@ -19,9 +20,9 @@ import json
 import time
 import uuid
 
-import aiohttp
 import numpy as np
 import opuslib_next
+import websockets
 
 from config.logger import setup_logging
 from core.providers.llm.base import LLMProviderBase
@@ -30,16 +31,17 @@ from core.providers.tts.dto.dto import SentenceType
 TAG = __name__
 logger = setup_logging()
 
-DEFAULT_URL = "wss://open.bigmodel.cn/api/paas/v4/realtime"
+DEFAULT_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 DEVICE_SAMPLE_RATE = 16000
-GLM_SAMPLE_RATE = 24000
 OPUS_FRAME = 960  # 60ms @16k
+CHUNK_MS = 100
+CHUNK_BYTES = DEVICE_SAMPLE_RATE * 2 * CHUNK_MS // 1000  # 3200 bytes @16k mono16
 
 
 class StreamingResampler:
     """24k -> 16k 流式线性插值重采样 (保留全缓冲, 位置连续, 无边界毛刺)。"""
 
-    def __init__(self, in_rate=GLM_SAMPLE_RATE, out_rate=DEVICE_SAMPLE_RATE):
+    def __init__(self, in_rate=24000, out_rate=DEVICE_SAMPLE_RATE):
         self.step = in_rate / out_rate
         self._buf = b""
         self._out_count = 0
@@ -66,20 +68,19 @@ class StreamingResampler:
 
 
 class LLMProvider(LLMProviderBase):
-    """GLM-Realtime 实时语音 provider (不实现文本 response 接口, 仅实时链路)。"""
+    """Qwen-Audio-3.0-Realtime 实时语音 provider (OpenAI Realtime 同构协议)。"""
 
     is_realtime = True
 
     def __init__(self, config):
         self.api_key = str(config.get("api_key") or "")
         self.base_url = str(config.get("base_url") or DEFAULT_URL)
-        self.model = str(config.get("model") or "glm-realtime-flash")
-        self.voice = str(config.get("voice") or "tongtong")
+        self.model = str(config.get("model") or "qwen-audio-3.0-realtime-flash")
+        self.voice = str(config.get("voice") or "longanqian")
         self.instructions = str(config.get("instructions") or "")
         self.tools_enabled = bool(config.get("tools", True))
-        self.temperature = float(config.get("temperature", 0.7))
+        self.turn_detection = str(config.get("turn_detection") or "smart_turn")
         self.conn = None
-        self._session = None
         self._ws = None
         self._task = None
         self._closing = False
@@ -92,6 +93,14 @@ class LLMProvider(LLMProviderBase):
         self._response_in_progress = False
         self._emotion_done = False
         self._tools_refresh_task = None
+        self._audio_count = 0
+        self._last_audio_log = 0.0
+        self._audio_delta_count = 0
+        self._send_buf = b""
+        self._opus_packets = 0
+        self._user_transcript = ""
+        self._last_stt_display = 0.0
+        self._last_assistant_display = 0.0
 
     # ---- 文本接口占位 (实时模式下不会走 chat()) ----
     def response(self, session_id, dialogue):
@@ -102,7 +111,6 @@ class LLMProvider(LLMProviderBase):
 
     # ---- 生命周期 ----
     async def start(self, conn):
-        """在连接的事件循环中启动实时会话 (由 connection.py 调用)。"""
         self.conn = conn
         self._closing = False
         self._sentence_id = uuid.uuid4().hex
@@ -122,58 +130,110 @@ class LLMProvider(LLMProviderBase):
                 pass
         await self._cleanup_ws()
 
+    def _ws_ok(self) -> bool:
+        """websockets 14 的 ClientConnection 无 .closed 属性, 用 close_code 判断。"""
+        ws = self._ws
+        if ws is None:
+            return False
+        try:
+            return ws.close_code is None
+        except Exception:
+            return False
+
     def resync_sentence_id(self):
-        """fusion_push 播放结束后恢复实时链路 sentence_id, 避免后续音频被丢弃。"""
+        """fusion_push 播放结束后恢复实时链路 sentence_id。"""
         if self.conn and self._sentence_id:
             self.conn.sentence_id = self._sentence_id
 
     async def cancel(self):
         """打断: 取消当前响应并清空输入缓冲 (双击/推送触发)。"""
-        if self._ws and not self._ws.closed:
-            try:
-                await self._ws.send_str(
-                    json.dumps(
+        if self._ws_ok():
+            if self._response_in_progress:
+                try:
+                    await self._send(
                         {
                             "type": "response.cancel",
                             "event_id": uuid.uuid4().hex,
                         }
                     )
-                )
-                await self._ws.send_str(
-                    json.dumps(
-                        {
-                            "type": "input_audio_buffer.clear",
-                            "event_id": uuid.uuid4().hex,
-                        }
-                    )
+                except Exception as e:
+                    logger.bind(tag=TAG).debug(f"cancel 发送失败: {e}")
+            try:
+                await self._send(
+                    {
+                        "type": "input_audio_buffer.clear",
+                        "event_id": uuid.uuid4().hex,
+                    }
                 )
             except Exception as e:
-                logger.bind(tag=TAG).debug(f"cancel 发送失败: {e}")
+                logger.bind(tag=TAG).debug(f"清空输入缓冲失败: {e}")
+            logger.bind(tag=TAG).info(
+                f"Qwen cancel: response_in_progress={self._response_in_progress}, 缓冲已清空"
+            )
         self._resampler.reset()
         self._transcript = ""
         self._tool_queue = []
         self._response_in_progress = False
         if self.conn:
-            self.conn.client_abort = False  # 打断已被 GLM 侧消费
+            self.conn.client_abort = False
 
-    # ---- 音频上行 ----
+    # ---- 音频上行 (裸 PCM base64, 100ms 分块) ----
     async def send_audio(self, pcm_frame: bytes):
-        if self._ws is None or self._ws.closed or not pcm_frame:
+        if not self._ws_ok() or not pcm_frame:
             return
         if getattr(self.conn, "client_abort", False):
             return
+        self._send_buf += pcm_frame
         try:
-            await self._ws.send_str(
-                json.dumps(
+            while len(self._send_buf) >= CHUNK_BYTES:
+                chunk = self._send_buf[:CHUNK_BYTES]
+                self._send_buf = self._send_buf[CHUNK_BYTES:]
+                await self._send(
                     {
                         "type": "input_audio_buffer.append",
                         "event_id": uuid.uuid4().hex,
-                        "audio": base64.b64encode(pcm_frame).decode("ascii"),
+                        "audio": base64.b64encode(chunk).decode("ascii"),
                     }
                 )
-            )
+                self._audio_count += 1
+                now = time.time()
+                if now - self._last_audio_log >= 5:
+                    self._last_audio_log = now
+                    logger.bind(tag=TAG).info(
+                        f"Qwen 音频上行: 累计 {self._audio_count} 块 (100ms/块)"
+                    )
         except Exception as e:
             logger.bind(tag=TAG).debug(f"上传音频失败: {e}")
+
+    async def commit_and_respond(self):
+        """备用: client_vad 模式下的判停触发 (smart_turn 默认不需要)。"""
+        if not self._ws_ok():
+            return
+        try:
+            await self._send({"type": "input_audio_buffer.commit"})
+            await self._send(
+                {
+                    "type": "response.create",
+                    "event_id": uuid.uuid4().hex,
+                    "client_timestamp": int(time.time() * 1000),
+                }
+            )
+            logger.bind(tag=TAG).info("Qwen commit + response.create 已发送")
+        except Exception as e:
+            logger.bind(tag=TAG).warning(f"commit_and_respond 失败: {e}")
+
+    async def clear_buffer(self):
+        if not self._ws_ok():
+            return
+        try:
+            await self._send({"type": "input_audio_buffer.clear"})
+        except Exception as e:
+            logger.bind(tag=TAG).debug(f"clear_buffer 失败: {e}")
+
+    async def _send(self, payload: dict):
+        if not self._ws_ok():
+            return
+        await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
     # ---- 主循环 ----
     async def _run(self):
@@ -183,15 +243,15 @@ class LLMProvider(LLMProviderBase):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.bind(tag=TAG).error(f"GLM-Realtime 连接异常: {e}")
+                logger.bind(tag=TAG).error(f"Qwen-Realtime 连接异常: {e}")
             if self._closing:
                 break
             self._reconnect_attempts += 1
             if self._reconnect_attempts > 5:
-                logger.bind(tag=TAG).error("GLM-Realtime 连续重连失败, 停止重连")
+                logger.bind(tag=TAG).error("Qwen-Realtime 连续重连失败, 停止重连")
                 break
             delay = min(2**self._reconnect_attempts, 15)
-            logger.bind(tag=TAG).info(f"GLM-Realtime {delay}s 后重连 (第 {self._reconnect_attempts} 次)")
+            logger.bind(tag=TAG).info(f"Qwen-Realtime {delay}s 后重连 (第 {self._reconnect_attempts} 次)")
             try:
                 await asyncio.sleep(delay)
             except asyncio.CancelledError:
@@ -199,51 +259,41 @@ class LLMProvider(LLMProviderBase):
 
     async def _connect_and_loop(self):
         if not self.api_key:
-            logger.bind(tag=TAG).error("GLM-Realtime 未配置 api_key, 无法连接")
+            logger.bind(tag=TAG).error("Qwen-Realtime 未配置 api_key, 无法连接")
             return
-        self._session = aiohttp.ClientSession()
+        url = f"{self.base_url}?model={self.model}"
         try:
-            self._ws = await self._session.ws_connect(
-                self.base_url,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                heartbeat=20,
+            # 必须用 websockets 库: aiohttp 客户端经 WARP/代理时音频帧
+            # 无法被服务端 VAD 处理 (只回 session 事件, 无语音响应)。
+            self._ws = await websockets.connect(
+                url,
+                additional_headers={"Authorization": f"Bearer {self.api_key}"},
+                ping_interval=20,
             )
             self._reconnect_attempts = 0
             await self._send_session_update()
-            logger.bind(tag=TAG).info(f"GLM-Realtime 已连接: {self.model}")
-            # 延迟刷新工具列表 (MCP 工具初始化可能晚于首帧音频)
+            logger.bind(tag=TAG).info(f"Qwen-Realtime 已连接: {self.model}")
             self._tools_refresh_task = asyncio.create_task(self._refresh_tools_later())
-            async for msg in self._ws:
+            async for raw in self._ws:
                 if self._closing:
                     break
-                if msg.type == aiohttp.WSMsgType.TEXT:
+                if isinstance(raw, str):
                     try:
-                        await self._handle_message(json.loads(msg.data))
+                        await self._handle_message(json.loads(raw))
                     except Exception as e:
-                        logger.bind(tag=TAG).warning(f"GLM 消息处理失败: {e}")
-                elif msg.type in (
-                    aiohttp.WSMsgType.ERROR,
-                    aiohttp.WSMsgType.CLOSED,
-                    aiohttp.WSMsgType.CLOSE,
-                ):
-                    logger.bind(tag=TAG).warning(f"GLM WS 断开: {msg.type}")
-                    break
+                        logger.bind(tag=TAG).warning(f"Qwen 消息处理失败: {e}")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.bind(tag=TAG).warning(f"Qwen WS 断开: {e.code} {e.reason}")
         finally:
             await self._cleanup_ws()
 
     async def _cleanup_ws(self):
         try:
-            if self._ws and not self._ws.closed:
+            if self._ws_ok():
                 await self._ws.close()
         except Exception:
             pass
         self._ws = None
-        try:
-            if self._session:
-                await self._session.close()
-        except Exception:
-            pass
-        self._session = None
 
     async def _send_session_update(self):
         instructions = (
@@ -254,28 +304,27 @@ class LLMProvider(LLMProviderBase):
         payload = {
             "type": "session.update",
             "event_id": uuid.uuid4().hex,
-            "client_timestamp": int(time.time() * 1000),
             "session": {
-                "model": self.model,
-                "modalities": ["audio", "text"],
-                "instructions": instructions,
+                "modalities": ["text", "audio"],
                 "voice": self.voice,
+                "instructions": instructions,
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm",
                 "turn_detection": {
-                    "type": "server_vad",
-                    "create_response": True,
-                    "interrupt_response": True,
+                    "type": self.turn_detection,
+                    "threshold": 0.1,
+                    "silence_duration_ms": 1500,
                 },
-                "temperature": self.temperature,
-                "max_response_output_tokens": "inf",
-                "beta_fields": {"chat_mode": "audio", "tts_source": "e2e"},
             },
         }
         tools = self._collect_tools()
         if tools:
             payload["session"]["tools"] = tools
-        await self._ws.send_str(json.dumps(payload, ensure_ascii=False))
+        await self._send(payload)
+        logger.bind(tag=TAG).info(
+            f"Qwen session.update: model={self.model}, voice={self.voice}, "
+            f"vad={self.turn_detection}, tools={len(tools)}, instructions_len={len(instructions)}"
+        )
 
     def _collect_tools(self):
         if not self.tools_enabled or self.conn is None:
@@ -290,15 +339,14 @@ class LLMProvider(LLMProviderBase):
             return []
 
     async def _refresh_tools_later(self):
-        """连接 8s 后若工具列表已就绪且当前为空, 补发 session.update。"""
         try:
             await asyncio.sleep(8)
-            if self._closing or self._ws is None or self._ws.closed:
+            if self._closing or not self._ws_ok():
                 return
             tools = self._collect_tools()
             if tools:
                 await self._send_session_update()
-                logger.bind(tag=TAG).info(f"GLM-Realtime 工具已注入: {len(tools)} 个")
+                logger.bind(tag=TAG).info(f"Qwen-Realtime 工具已注入: {len(tools)} 个")
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -307,11 +355,16 @@ class LLMProvider(LLMProviderBase):
     # ---- 下行消息处理 ----
     async def _handle_message(self, data: dict):
         msg_type = data.get("type")
-        if msg_type in ("session.created", "session.updated", "heartbeat", "conversation.created"):
+        if msg_type in (
+            "session.created",
+            "session.updated",
+            "heartbeat",
+            "conversation.created",
+        ):
             return
         if msg_type == "error":
             err = data.get("error") or {}
-            logger.bind(tag=TAG).error(f"GLM error: {err.get('code')} {err.get('message')}")
+            logger.bind(tag=TAG).error(f"Qwen error: {err.get('code')} {err.get('message')}")
             return
         if msg_type == "response.created":
             self._response_in_progress = True
@@ -319,7 +372,18 @@ class LLMProvider(LLMProviderBase):
             self._tool_queue = []
             self._emotion_done = False
             self._resampler.reset()
+            self._audio_delta_count = 0
+            self._opus_packets = 0
+            self._user_transcript = ""
+            logger.bind(tag=TAG).info("Qwen response.created")
             if self.conn and self.conn.tts:
+                # 必须先通知设备进入播放状态, 否则设备仍在聆听态, 音频不发声
+                try:
+                    from core.handle.sendAudioHandle import send_tts_message
+
+                    await send_tts_message(self.conn, "start")
+                except Exception as e:
+                    logger.bind(tag=TAG).warning(f"发送 tts start 失败: {e}")
                 self.conn.tts.tts_audio_queue.put(
                     (SentenceType.FIRST, None, "", self._sentence_id)
                 )
@@ -328,6 +392,7 @@ class LLMProvider(LLMProviderBase):
             delta = data.get("delta")
             if not delta:
                 return
+            self._audio_delta_count += 1
             pcm = base64.b64decode(delta)
             out = self._resampler.feed(pcm)
             if out:
@@ -337,6 +402,10 @@ class LLMProvider(LLMProviderBase):
             delta = data.get("delta") or ""
             if delta:
                 self._transcript += delta
+                now = time.time()
+                if now - self._last_assistant_display >= 0.35:
+                    self._last_assistant_display = now
+                    await self._display_assistant_text(self._transcript)
                 if not self._emotion_done and self.conn:
                     self._emotion_done = True
                     try:
@@ -349,25 +418,76 @@ class LLMProvider(LLMProviderBase):
                     except Exception:
                         pass
             return
+        if msg_type == "conversation.item.input_audio_transcription.delta":
+            delta = data.get("delta") or ""
+            if delta:
+                self._user_transcript += delta
+                now = time.time()
+                if now - self._last_stt_display >= 0.4:
+                    self._last_stt_display = now
+                    await self._display_user_text(self._user_transcript)
+            return
+        if msg_type == "conversation.item.input_audio_transcription.completed":
+            transcript = data.get("transcript") or ""
+            if transcript:
+                self._user_transcript = transcript
+                await self._display_user_text(transcript)
+                logger.bind(tag=TAG).info(f"Qwen 用户转写: {transcript}")
+            return
         if msg_type == "response.function_call_arguments.done":
             self._tool_queue.append(
                 {
                     "name": data.get("name"),
                     "arguments": data.get("arguments") or "{}",
-                    "event_id": data.get("event_id"),
+                    "call_id": data.get("call_id") or data.get("event_id"),
                 }
             )
             return
         if msg_type == "response.done":
             await self._finish_response()
             return
+        if msg_type == "input_audio_buffer.speech_started":
+            logger.bind(tag=TAG).info("Qwen speech_started")
+            return
         if msg_type in (
-            "input_audio_buffer.speech_started",
             "input_audio_buffer.speech_stopped",
             "input_audio_buffer.committed",
             "input_audio_buffer.cleared",
+            "conversation.item.created",
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.content_part.added",
+            "response.content_part.done",
+            "response.audio.done",
+            "response.audio_transcript.done",
+            "response.text.delta",
+            "response.text.done",
+            "response.function_call_arguments.delta",
         ):
             return
+        logger.bind(tag=TAG).debug(f"Qwen 未处理事件: {msg_type}")
+
+    async def _display_user_text(self, text: str):
+        """把用户语音转写显示到机器人屏幕 ({"type":"stt"})。"""
+        if not self.conn or not text:
+            return
+        try:
+            from core.handle.sendAudioHandle import send_display_message
+
+            await send_display_message(self.conn, text)
+        except Exception as e:
+            logger.bind(tag=TAG).debug(f"发送转写显示失败: {e}")
+
+    async def _display_assistant_text(self, text: str):
+        """把助手回复文本实时显示到机器人屏幕 (tts sentence_start)。"""
+        if not self.conn or not text:
+            return
+        try:
+            from core.handle.sendAudioHandle import send_tts_message
+
+            await send_tts_message(self.conn, "sentence_start", text)
+        except Exception as e:
+            logger.bind(tag=TAG).debug(f"发送回复文本显示失败: {e}")
 
     def _push_opus(self, pcm16: bytes):
         if not self.conn or not self.conn.tts:
@@ -380,17 +500,25 @@ class LLMProvider(LLMProviderBase):
             except Exception as e:
                 logger.bind(tag=TAG).debug(f"opus 编码失败: {e}")
                 continue
+            self._opus_packets += 1
             self.conn.tts.tts_audio_queue.put(
                 (SentenceType.MIDDLE, packet, self._transcript, self._sentence_id)
             )
 
     async def _finish_response(self):
         self._response_in_progress = False
+        logger.bind(tag=TAG).info(
+            f"Qwen response.done: audio_delta={self._audio_delta_count}, "
+            f"opus_packets={self._opus_packets}, tools={len(self._tool_queue)}, "
+            f"transcript_len={len(self._transcript)}"
+        )
         if self._tool_queue:
             await self._run_tools()
             return
         if self.conn and self.conn.tts:
             text = self._transcript or ""
+            if text:
+                await self._display_assistant_text(text)
             self.conn.tts.tts_audio_queue.put(
                 (SentenceType.LAST, [], text, self._sentence_id)
             )
@@ -398,9 +526,11 @@ class LLMProvider(LLMProviderBase):
         self._transcript = ""
 
     async def _run_tools(self):
-        """执行 GLM 请求的工具调用, 结果回传后触发新一轮回复。"""
         if not self.conn or not self._tool_queue:
             return
+        logger.bind(tag=TAG).info(
+            f"Qwen 执行工具调用: {[c.get('name') for c in self._tool_queue]}"
+        )
         outputs = []
         for call in self._tool_queue:
             name = call.get("name")
@@ -415,41 +545,40 @@ class LLMProvider(LLMProviderBase):
                     self.conn, {"name": name, "arguments": args}
                 )
                 outputs.append(
-                    {"name": name, "output": getattr(result, "response", str(result))}
+                    {
+                        "call_id": call.get("call_id"),
+                        "output": getattr(result, "response", str(result)),
+                    }
                 )
             except Exception as e:
                 logger.bind(tag=TAG).error(f"工具 {name} 执行失败: {e}")
-                outputs.append({"name": name, "output": f"error: {e}"})
+                outputs.append({"call_id": call.get("call_id"), "output": f"error: {e}"})
         self._tool_queue = []
-        if self._ws is None or self._ws.closed:
+        if not self._ws_ok():
             return
         for o in outputs:
             try:
-                await self._ws.send_str(
-                    json.dumps(
-                        {
-                            "type": "conversation.item.create",
-                            "event_id": uuid.uuid4().hex,
-                            "item": {
-                                "type": "function_call_output",
-                                "output": o["output"],
-                            },
+                await self._send(
+                    {
+                        "type": "conversation.item.create",
+                        "event_id": uuid.uuid4().hex,
+                        "item": {
+                            "type": "function_call_output",
+                            "call_id": o["call_id"],
+                            "output": o["output"],
                         },
-                        ensure_ascii=False,
-                    )
+                    }
                 )
             except Exception as e:
                 logger.bind(tag=TAG).warning(f"回传工具结果失败: {e}")
                 return
         try:
-            await self._ws.send_str(
-                json.dumps(
-                    {
-                        "type": "response.create",
-                        "event_id": uuid.uuid4().hex,
-                        "client_timestamp": int(time.time() * 1000),
-                    }
-                )
+            await self._send(
+                {
+                    "type": "response.create",
+                    "event_id": uuid.uuid4().hex,
+                    "client_timestamp": int(time.time() * 1000),
+                }
             )
         except Exception as e:
             logger.bind(tag=TAG).warning(f"触发续答失败: {e}")
